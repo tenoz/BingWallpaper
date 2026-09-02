@@ -10,11 +10,6 @@ let AGENT_PLIST      = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Launch
 
 // MARK: - 模型
 
-enum AutoMode: String, CaseIterable {
-    case latest = "最新"
-    case random = "随机"
-}
-
 enum UpdateMode: String, CaseIterable {
     case interval = "按间隔"
     case daily    = "每天定时"
@@ -65,9 +60,6 @@ func dashDate(_ s: String) -> String {
 @MainActor
 final class WallpaperManager: ObservableObject {
 
-    @Published var autoMode: AutoMode {
-        didSet { UserDefaults.standard.set(autoMode.rawValue, forKey: "autoMode") }
-    }
     @Published var status  = "就绪"
     @Published var current = "—"
     @Published var currentURL: URL?
@@ -86,12 +78,16 @@ final class WallpaperManager: ObservableObject {
             setupTimer()
         }
     }
-    /// 每天定时的时刻（24h 制整点），默认 8 → 08:00
-    @Published var dailyHour: Int {
+    /// 每天定时的时刻（24h 制 HH:mm），默认 08:00
+    @Published var dailyTime: String {
         didSet {
-            UserDefaults.standard.set(dailyHour, forKey: "dailyHour")
+            UserDefaults.standard.set(dailyTime, forKey: "dailyTime")
             if updateMode == .daily { setupTimer() }
         }
+    }
+    /// 近期使用过的定时时刻（最多 3 个，新的在前），作快捷选择
+    @Published var recentTimes: [String] {
+        didSet { UserDefaults.standard.set(recentTimes, forKey: "recentTimes") }
     }
     /// 壁纸填充方式，持久化；改变后由菜单显式重应用
     @Published var scalingMode: ScalingMode {
@@ -116,11 +112,11 @@ final class WallpaperManager: ObservableObject {
     private var manifestFile: URL { SUPPORT_DIR.appendingPathComponent("downloaded.json") }
 
     init() {
-        autoMode = AutoMode(rawValue: UserDefaults.standard.string(forKey: "autoMode") ?? "") ?? .latest
         autostart = FileManager.default.fileExists(atPath: AGENT_PLIST.path)   // init 内不触发 didSet
         intervalHours = UserDefaults.standard.object(forKey: "intervalHours") as? Int ?? 3
         updateMode    = UpdateMode(rawValue: UserDefaults.standard.string(forKey: "updateMode") ?? "") ?? .interval
-        dailyHour     = UserDefaults.standard.object(forKey: "dailyHour") as? Int ?? 8
+        dailyTime     = UserDefaults.standard.string(forKey: "dailyTime") ?? "08:00"
+        recentTimes   = UserDefaults.standard.stringArray(forKey: "recentTimes") ?? ["08:00"]
         scalingMode   = ScalingMode(rawValue: UserDefaults.standard.string(forKey: "scalingMode") ?? "") ?? .fill
         let savedDir = UserDefaults.standard.string(forKey: "picsDir") ?? ""
         picsDir = savedDir.isEmpty ? DEFAULT_PICS_DIR : URL(fileURLWithPath: savedDir, isDirectory: true)
@@ -154,13 +150,51 @@ final class WallpaperManager: ObservableObject {
         }
     }
 
-    /// 下一个 dailyHour:00 的时刻（今日已过则排明天）
+    /// 下一个 dailyTime 时刻（今日已过则排明天）
     private func nextDailyFire() -> Date {
+        let p = dailyTime.split(separator: ":").compactMap { Int($0) }
+        let h = p.count > 0 ? min(max(p[0], 0), 23) : 8
+        let m = p.count > 1 ? min(max(p[1], 0), 59) : 0
         var c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
-        c.hour = dailyHour
-        c.minute = 0
+        c.hour = h
+        c.minute = m
         let t = Calendar.current.date(from: c) ?? Date().addingTimeInterval(86400)
         return t > Date() ? t : t.addingTimeInterval(86400)
+    }
+
+    /// 规范化 "H:mm" → "HH:mm"；非法返回 nil
+    static func normalizeTime(_ s: String) -> String? {
+        let p = s.trimmingCharacters(in: .whitespaces).split(separator: ":")
+        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]),
+              (0...23).contains(h), (0...59).contains(m) else { return nil }
+        return String(format: "%02d:%02d", h, m)
+    }
+
+    /// 设每天定时时刻并切到定时模式；同时记入近期使用（去重、最新在前、最多 3 个）
+    func setDailyTime(_ t: String) {
+        dailyTime = t
+        updateMode = .daily
+        recentTimes = ([t] + recentTimes.filter { $0 != t }).prefix(3).map { $0 }
+        status = "更新方式：每天 \(t)"
+    }
+
+    /// 弹窗输入每天定时的时分（HH:mm）
+    func askCustomTime() {
+        let alert = NSAlert()
+        alert.messageText = "每天定时时刻"
+        alert.informativeText = "24 小时制，格式 HH:mm（例如 08:30）"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        input.stringValue = dailyTime
+        alert.accessoryView = input
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)   // LSUIElement App 需主动激活
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let t = Self.normalizeTime(input.stringValue) else {
+            status = "已取消，时间格式须为 HH:mm"
+            return
+        }
+        setDailyTime(t)
     }
 
     // MARK: 抓取与下载
@@ -227,9 +261,9 @@ final class WallpaperManager: ObservableObject {
 
     // MARK: 应用壁纸
 
+    /// 检查后自动应用最新一张
     func applyAuto(note: String = "") {
-        let t = (autoMode == .latest) ? newestImage() : randomImage()
-        guard let t else { status = "库内无图片" + note; return }
+        guard let t = newestImage() else { status = "库内无图片" + note; return }
         setWallpaper(t, note: note)
     }
 
@@ -404,6 +438,27 @@ struct PreviewNavButton: View {
     }
 }
 
+/// 子菜单入口行：与 MenuRow 同排版（左对齐、同 padding、hover 高亮）
+struct SubmenuLabel: View {
+    let title: String
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(hovering ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22) : .clear)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var mgr: WallpaperManager
     @State private var thumb: NSImage?
@@ -415,7 +470,7 @@ struct MenuContent: View {
 
     private var updateText: String {
         if mgr.updateMode == .interval { return "更新方式：每 \(mgr.intervalHours) 小时" }
-        return String(format: "更新方式：每天 %02d:00", mgr.dailyHour)
+        return "更新方式：每天 \(mgr.dailyTime)"
     }
 
     var body: some View {
@@ -453,23 +508,6 @@ struct MenuContent: View {
 
             Divider()
 
-            Menu {
-                ForEach(AutoMode.allCases, id: \.rawValue) { m in
-                    Button {
-                        mgr.autoMode = m
-                        mgr.applyAuto()
-                    } label: {
-                        if mgr.autoMode == m { Label(m.rawValue, systemImage: "checkmark") }
-                        else { Text(m.rawValue) }
-                    }
-                }
-            } label: {
-                Text("自动模式：\(mgr.autoMode.rawValue)")
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 280)
-            .padding(.vertical, 2)
-
             MenuRow("设为最新", icon: "sparkles") { if let u = mgr.newestImage() { mgr.setWallpaper(u) } }
             MenuRow("随机一张", icon: "shuffle")  { if let u = mgr.randomImage() { mgr.setWallpaper(u) } }
 
@@ -487,11 +525,10 @@ struct MenuContent: View {
                     }
                 }
             } label: {
-                Text("壁纸填充：\(mgr.scalingMode.rawValue)")
+                SubmenuLabel(title: "壁纸填充：\(mgr.scalingMode.rawValue)")
             }
             .menuStyle(.borderlessButton)
             .frame(width: 280)
-            .padding(.vertical, 2)
 
             Menu {
                 Menu("按间隔") {
@@ -506,24 +543,27 @@ struct MenuContent: View {
                         }
                     }
                 }
-                Menu("每天定时") {
-                    ForEach(0..<24, id: \.self) { h in
+                Section("近期使用") {
+                    ForEach(mgr.recentTimes, id: \.self) { t in
                         Button {
-                            mgr.dailyHour = h
-                            mgr.updateMode = .daily
+                            mgr.setDailyTime(t)
                         } label: {
-                            if mgr.updateMode == .daily && mgr.dailyHour == h {
-                                Label(String(format: "%02d:00", h), systemImage: "checkmark")
-                            } else { Text(String(format: "%02d:00", h)) }
+                            if mgr.updateMode == .daily && mgr.dailyTime == t {
+                                Label("每天 \(t)", systemImage: "checkmark")
+                            } else { Text("每天 \(t)") }
                         }
                     }
                 }
+                Button {
+                    mgr.askCustomTime()
+                } label: {
+                    Label("自定义时间…", systemImage: "pencil")
+                }
             } label: {
-                Text(updateText)
+                SubmenuLabel(title: updateText)
             }
             .menuStyle(.borderlessButton)
             .frame(width: 280)
-            .padding(.vertical, 2)
 
             MenuRow("立即检查更新", icon: "arrow.clockwise") { Task { await mgr.refresh() } }
             MenuRow("打开壁纸文件夹", icon: "folder")        { mgr.openFolder() }
