@@ -438,10 +438,25 @@ struct PreviewNavButton: View {
     }
 }
 
-/// 子菜单入口行：与 MenuRow 同排版（左对齐、同 padding、hover 高亮）
+/// 子菜单入口行：padding / 行长 / hover 高亮全在样式里，与 MenuRow 用同一套数值，
+/// 保证「壁纸填充」「更新方式」两行与普通菜单行严格对齐
+struct RowMenuStyle: MenuStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        Menu(configuration)
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(hovering ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22) : .clear)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+    }
+}
+
 struct SubmenuLabel: View {
     let title: String
-    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -451,11 +466,6 @@ struct SubmenuLabel: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(hovering ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22) : .clear)
-        .contentShape(Rectangle())
-        .onHover { hovering = $0 }
     }
 }
 
@@ -527,7 +537,7 @@ struct MenuContent: View {
             } label: {
                 SubmenuLabel(title: "壁纸填充：\(mgr.scalingMode.rawValue)")
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(RowMenuStyle())
             .frame(width: 280)
 
             Menu {
@@ -562,7 +572,7 @@ struct MenuContent: View {
             } label: {
                 SubmenuLabel(title: updateText)
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(RowMenuStyle())
             .frame(width: 280)
 
             MenuRow("立即检查更新", icon: "arrow.clockwise") { Task { await mgr.refresh() } }
