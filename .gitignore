@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# 会话/记忆数据（非源码）
+.workbuddy/
+
+# 构建产物（build.sh 可从 logo2.jpeg + 源码完整重建）
+build/
+AppIcon.iconset/
+AppIcon.icns
+.logo-src.png
