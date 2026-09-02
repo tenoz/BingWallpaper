@@ -74,11 +74,17 @@ MD5 确认是**内容不同的两张图**，非重复，无需处理。
 `/Applications/BingWallpaper.app`，Swift 原生，功能：
 - 抓最新 Bing 4K 壁纸并下载
 - 按**自身清单**去重，不重复下载
-- 自动切换（最新 / 随机），每 3 小时检查一次
+- 自动切换（最新 / 随机），检查间隔可手动设定（1/3/6/12/24 小时，默认 3，存 `intervalHours`）
 - 手动切换（最新 / 上一张 / 下一张 / 随机）
+- 菜单顶部显示当前桌面壁纸预览图（`.window` 样式 + ImageIO 缩略图，maxPixel 560）
 - 菜单可手动触发下载
 - 下载目录可手动指定（默认 `/Users/pxdog/Pictures/bing-wallpaper`，存 UserDefaults 的 `picsDir`）
 - 开机启动开关，**默认关闭**
+
+## 版本管理
+
+git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`（会话记忆）、
+`build/`、`AppIcon.iconset/`、`AppIcon.icns`、`.logo-src.png`（全部可由 logo2.jpeg + build.sh 重建）。
 
 ## 铁律与约定
 
@@ -101,7 +107,9 @@ MD5 确认是**内容不同的两张图**，非重复，无需处理。
 ```bash
 /Users/pxdog/Project/BingWallpaper/build.sh
 ```
-脚本依次：停 App → 生成图标 → 编译 → 写 Info.plist → ad-hoc 签名 → 重启 App。
+脚本依次：停 App → 生成图标 → **暂存目录**编译 + 写 Info.plist + ad-hoc 签名并验证 →
+搬运到 /Applications → 重启 App。
+**别改回在 /Applications 原地签名**：macOS 26 下原地签名会产生坏 seal（见"已知的坑"）。
 
 手动启动：`open -a /Applications/BingWallpaper.app`
 
@@ -145,6 +153,13 @@ MD5 确认是**内容不同的两张图**，非重复，无需处理。
 - **agent shell 里 `ps` 被拦**：查进程存活用 `pgrep -x <名>` + `kill -0 <pid>`。
 - **Swift init 顺序**：实例计算属性不能在 init 里访问（报 `self used before all
   stored properties are initialized`），路径常量请放顶层 `let`。
+  有 didSet 的存储属性同理：init 里赋值不触发 didSet，且必须在访问 self 前先初始化。
+- **/Applications 原地 ad-hoc 签名会产坏 seal（macOS 26 实测）**：`codesign -s -` 对
+  /Applications 下的 bundle 签名后，`CodeResources` 的 files2 把主程序记成
+  `MacOS/BingWallpaper.cstemp`（签名临时文件名），`codesign -v` 报
+  `a sealed resource is missing or invalid`，删签名重签仍 100% 复现；
+  **同一 bundle 在项目目录签名一次通过**。build.sh 因此改为暂存构建+验证后 ditto 搬运。
+  排查时用 `plutil -p .../CodeResources | grep cstemp` 认症。
 
 ## 待办
 
