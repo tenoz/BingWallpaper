@@ -15,6 +15,28 @@ enum AutoMode: String, CaseIterable {
     case random = "随机"
 }
 
+enum UpdateMode: String, CaseIterable {
+    case interval = "按间隔"
+    case daily    = "每天定时"
+}
+
+/// 壁纸填充方式（映射 NSImageScaling；「拼贴」无公开 API，未纳入，见 CLAUDE.md）
+enum ScalingMode: String, CaseIterable {
+    case fill    = "充满屏幕"
+    case fit     = "适合于屏幕"
+    case stretch = "拉伸以充满屏幕"
+    case center  = "居中"
+
+    var scaling: NSImageScaling {
+        switch self {
+        case .fill:    return .scaleProportionallyUpOrDown
+        case .fit:     return .scaleProportionallyDown
+        case .stretch: return .scaleAxesIndependently
+        case .center:  return .scaleNone
+        }
+    }
+}
+
 struct BingImage {
     let date: String
     let name: String
@@ -50,12 +72,30 @@ final class WallpaperManager: ObservableObject {
     @Published var current = "—"
     @Published var currentURL: URL?
 
-    /// 自动检查间隔（小时），可手动设定，持久化到 UserDefaults，默认 3
+    /// 自动检查间隔（小时），按间隔模式生效，持久化到 UserDefaults，默认 3
     @Published var intervalHours: Int {
         didSet {
             UserDefaults.standard.set(intervalHours, forKey: "intervalHours")
+            if updateMode == .interval { setupTimer() }
+        }
+    }
+    /// 更新方式：按间隔 / 每天定时，二选一
+    @Published var updateMode: UpdateMode {
+        didSet {
+            UserDefaults.standard.set(updateMode.rawValue, forKey: "updateMode")
             setupTimer()
         }
+    }
+    /// 每天定时的时刻（24h 制整点），默认 8 → 08:00
+    @Published var dailyHour: Int {
+        didSet {
+            UserDefaults.standard.set(dailyHour, forKey: "dailyHour")
+            if updateMode == .daily { setupTimer() }
+        }
+    }
+    /// 壁纸填充方式，持久化；改变后由菜单显式重应用
+    @Published var scalingMode: ScalingMode {
+        didSet { UserDefaults.standard.set(scalingMode.rawValue, forKey: "scalingMode") }
     }
     private var timer: Timer?
 
@@ -79,6 +119,9 @@ final class WallpaperManager: ObservableObject {
         autoMode = AutoMode(rawValue: UserDefaults.standard.string(forKey: "autoMode") ?? "") ?? .latest
         autostart = FileManager.default.fileExists(atPath: AGENT_PLIST.path)   // init 内不触发 didSet
         intervalHours = UserDefaults.standard.object(forKey: "intervalHours") as? Int ?? 3
+        updateMode    = UpdateMode(rawValue: UserDefaults.standard.string(forKey: "updateMode") ?? "") ?? .interval
+        dailyHour     = UserDefaults.standard.object(forKey: "dailyHour") as? Int ?? 8
+        scalingMode   = ScalingMode(rawValue: UserDefaults.standard.string(forKey: "scalingMode") ?? "") ?? .fill
         let savedDir = UserDefaults.standard.string(forKey: "picsDir") ?? ""
         picsDir = savedDir.isEmpty ? DEFAULT_PICS_DIR : URL(fileURLWithPath: savedDir, isDirectory: true)
         try? FileManager.default.createDirectory(at: picsDir,     withIntermediateDirectories: true)
@@ -90,12 +133,34 @@ final class WallpaperManager: ObservableObject {
         Task { @MainActor in await self.refresh() }
     }
 
-    /// 按当前设定重建定时器（间隔变化时先 invalidate 旧的，避免双定时器）
+    /// 按更新方式重建定时器（先 invalidate 旧的，避免双定时器）
     private func setupTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(intervalHours * 3600), repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
+        timer = nil
+        switch updateMode {
+        case .interval:
+            timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(intervalHours * 3600), repeats: true) { [weak self] _ in
+                Task { @MainActor in await self?.refresh() }
+            }
+        case .daily:
+            // 一次性定时器到点触发，触发后重排下一天（避免累积漂移，天然跟随修改）
+            let wait = max(nextDailyFire().timeIntervalSinceNow, 1)
+            timer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    await self?.refresh()
+                    self?.setupTimer()
+                }
+            }
         }
+    }
+
+    /// 下一个 dailyHour:00 的时刻（今日已过则排明天）
+    private func nextDailyFire() -> Date {
+        var c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        c.hour = dailyHour
+        c.minute = 0
+        let t = Calendar.current.date(from: c) ?? Date().addingTimeInterval(86400)
+        return t > Date() ? t : t.addingTimeInterval(86400)
     }
 
     // MARK: 抓取与下载
@@ -178,7 +243,13 @@ final class WallpaperManager: ObservableObject {
             tries += 1
         }
         guard !screens.isEmpty else { status = "未取到屏幕"; return }
-        for s in screens { try? ws.setDesktopImageURL(url, for: s, options: [:]) }
+        // ⚠️ 此 SDK 未把 NSWorkspaceDesktopImageScalingKey 等常量导入为 .scaling 等成员，
+        //    只能用 C 原始字符串构造（实测 rawValue init 可用）
+        let scalingKey  = NSWorkspace.DesktopImageOptionKey(rawValue: "NSWorkspaceDesktopImageScalingKey")
+        let clippingKey = NSWorkspace.DesktopImageOptionKey(rawValue: "NSWorkspaceDesktopImageAllowClippingKey")
+        var opts: [NSWorkspace.DesktopImageOptionKey: Any] = [scalingKey: scalingMode.scaling.rawValue]
+        if scalingMode == .fill { opts[clippingKey] = true }
+        for s in screens { try? ws.setDesktopImageURL(url, for: s, options: opts) }
         current    = url.lastPathComponent
         currentURL = url
         status  = "已设为 " + url.lastPathComponent + note
@@ -313,6 +384,26 @@ struct MenuRow: View {
     }
 }
 
+/// 预览图两侧的翻页按钮：半透明圆形，悬停加深
+struct PreviewNavButton: View {
+    let systemName: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(.black.opacity(hovering ? 0.55 : 0.3)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var mgr: WallpaperManager
     @State private var thumb: NSImage?
@@ -322,21 +413,35 @@ struct MenuContent: View {
         (mgr.picsDir.path as NSString).abbreviatingWithTildeInPath
     }
 
+    private var updateText: String {
+        if mgr.updateMode == .interval { return "更新方式：每 \(mgr.intervalHours) 小时" }
+        return String(format: "更新方式：每天 %02d:00", mgr.dailyHour)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 顶部：当前桌面壁纸预览
-            Group {
-                if let thumb {
-                    Image(nsImage: thumb).resizable().scaledToFill()
-                } else {
-                    ZStack {
-                        Color(nsColor: .windowBackgroundColor)
-                        Image(systemName: "photo").foregroundStyle(.tertiary)
+            // 顶部：当前桌面壁纸预览，两侧叠上一张/下一张
+            ZStack {
+                Group {
+                    if let thumb {
+                        Image(nsImage: thumb).resizable().scaledToFill()
+                    } else {
+                        ZStack {
+                            Color(nsColor: .windowBackgroundColor)
+                            Image(systemName: "photo").foregroundStyle(.tertiary)
+                        }
                     }
                 }
+                .frame(width: 280, height: 158)
+                .clipped()
+
+                HStack {
+                    PreviewNavButton(systemName: "chevron.left")  { mgr.step(-1) }
+                    Spacer()
+                    PreviewNavButton(systemName: "chevron.right") { mgr.step(1) }
+                }
+                .padding(.horizontal, 6)
             }
-            .frame(width: 280, height: 158)
-            .clipped()
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(mgr.current).font(.caption).lineLimit(1).truncationMode(.middle)
@@ -365,24 +470,56 @@ struct MenuContent: View {
             .frame(width: 280)
             .padding(.vertical, 2)
 
-            MenuRow("设为最新", icon: "sparkles")   { if let u = mgr.newestImage() { mgr.setWallpaper(u) } }
-            MenuRow("随机一张", icon: "shuffle")    { if let u = mgr.randomImage() { mgr.setWallpaper(u) } }
-            MenuRow("上一张",   icon: "chevron.left")  { mgr.step(-1) }
-            MenuRow("下一张",   icon: "chevron.right") { mgr.step(1) }
+            MenuRow("设为最新", icon: "sparkles") { if let u = mgr.newestImage() { mgr.setWallpaper(u) } }
+            MenuRow("随机一张", icon: "shuffle")  { if let u = mgr.randomImage() { mgr.setWallpaper(u) } }
 
             Divider()
 
             Menu {
-                ForEach([1, 3, 6, 12, 24], id: \.self) { h in
+                ForEach(ScalingMode.allCases, id: \.rawValue) { m in
                     Button {
-                        mgr.intervalHours = h
+                        guard mgr.scalingMode != m else { return }
+                        mgr.scalingMode = m
+                        if let u = mgr.currentURL { mgr.setWallpaper(u) }
                     } label: {
-                        if mgr.intervalHours == h { Label("每 \(h) 小时", systemImage: "checkmark") }
-                        else { Text("每 \(h) 小时") }
+                        if mgr.scalingMode == m { Label(m.rawValue, systemImage: "checkmark") }
+                        else { Text(m.rawValue) }
                     }
                 }
             } label: {
-                Text("更新间隔：每 \(mgr.intervalHours) 小时")
+                Text("壁纸填充：\(mgr.scalingMode.rawValue)")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 280)
+            .padding(.vertical, 2)
+
+            Menu {
+                Menu("按间隔") {
+                    ForEach([1, 3, 6, 12, 24], id: \.self) { h in
+                        Button {
+                            mgr.intervalHours = h
+                            mgr.updateMode = .interval
+                        } label: {
+                            if mgr.updateMode == .interval && mgr.intervalHours == h {
+                                Label("每 \(h) 小时", systemImage: "checkmark")
+                            } else { Text("每 \(h) 小时") }
+                        }
+                    }
+                }
+                Menu("每天定时") {
+                    ForEach(0..<24, id: \.self) { h in
+                        Button {
+                            mgr.dailyHour = h
+                            mgr.updateMode = .daily
+                        } label: {
+                            if mgr.updateMode == .daily && mgr.dailyHour == h {
+                                Label(String(format: "%02d:00", h), systemImage: "checkmark")
+                            } else { Text(String(format: "%02d:00", h)) }
+                        }
+                    }
+                }
+            } label: {
+                Text(updateText)
             }
             .menuStyle(.borderlessButton)
             .frame(width: 280)

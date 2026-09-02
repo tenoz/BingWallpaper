@@ -74,8 +74,12 @@ MD5 确认是**内容不同的两张图**，非重复，无需处理。
 `/Applications/BingWallpaper.app`，Swift 原生，功能：
 - 抓最新 Bing 4K 壁纸并下载
 - 按**自身清单**去重，不重复下载
-- 自动切换（最新 / 随机），检查间隔可手动设定（1/3/6/12/24 小时，默认 3，存 `intervalHours`）
-- 手动切换（最新 / 上一张 / 下一张 / 随机）
+- 更新方式二选一（存 `updateMode`）：**按间隔**（1/3/6/12/24 小时，默认 3，存 `intervalHours`）
+  / **每天定时**（00:00–23:00 整点，默认 08:00，存 `dailyHour`；一次性定时器到点重排防漂移）
+- 壁纸填充方式（存 `scalingMode`，默认充满屏幕）：充满屏幕 / 适合于屏幕 /
+  拉伸以充满屏幕 / 居中，映射 `NSImageScaling`，选择后立即对当前壁纸重应用
+- 自动切换（最新 / 随机）
+- 手动切换：菜单顶部预览图**两侧圆形按钮** = 上一张 / 下一张（从系统当前壁纸反查索引，无状态）
 - 菜单顶部显示当前桌面壁纸预览图（`.window` 样式 + ImageIO 缩略图，maxPixel 560）
 - 菜单可手动触发下载
 - 下载目录可手动指定（默认 `/Users/pxdog/Pictures/bing-wallpaper`，存 UserDefaults 的 `picsDir`）
@@ -154,6 +158,13 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 - **Swift init 顺序**：实例计算属性不能在 init 里访问（报 `self used before all
   stored properties are initialized`），路径常量请放顶层 `let`。
   有 didSet 的存储属性同理：init 里赋值不触发 didSet，且必须在访问 self 前先初始化。
+- **桌面图选项常量未被 Swift 导入**：`NSWorkspaceDesktopImageScalingKey` 等
+  在本 SDK（swiftc 6.3.3）**没有**导入为 `NSWorkspace.DesktopImageOptionKey.scaling`
+  等成员（`.scalingKey` 变体也不存在），但类型改名通知又指向该类型。
+  **用 `init(rawValue: "NSWorkspaceDesktopImageScalingKey")` 构造**（实测可用）。
+- **「拼贴」无公开 API**：`setDesktopImageURL` 选项仅 scaling / allowClipping / fillColor，
+  系统设置的拼贴走私有 WallpaperKit。要支持只能预合成拼贴大图再以充满屏幕应用，
+  代价：桌面 URL 变成合成文件，上一张/下一张导航失效（见"未决"）。
 - **/Applications 原地 ad-hoc 签名会产坏 seal（macOS 26 实测）**：`codesign -s -` 对
   /Applications 下的 bundle 签名后，`CodeResources` 的 files2 把主程序记成
   `MacOS/BingWallpaper.cstemp`（签名临时文件名），`codesign -v` 报
@@ -172,3 +183,6 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 
 - 菜单栏图标是否换成 logo —— **未排期**。触发条件：老大提供纯黑单色剪影版素材
   （全彩 logo 缩到 18px 会糊；macOS 菜单栏图标惯例走单色模板模式）
+- 壁纸填充第五种「拼贴」—— **未排期**。公开 API 不支持（见"已知的坑"），
+  可行方案是预合成拼贴大图 + 充满屏幕应用，会破坏上一张/下一张导航。
+  触发条件：老大确认真的需要拼贴 4K 图（4K 图拼 4K 屏 ≈ 居中，实际意义存疑）。
