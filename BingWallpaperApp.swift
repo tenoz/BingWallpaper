@@ -10,11 +10,6 @@ let AGENT_PLIST      = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Launch
 
 // MARK: - 模型
 
-enum UpdateMode: String, CaseIterable {
-    case interval = "按间隔"
-    case daily    = "每天定时"
-}
-
 /// 壁纸填充方式（映射 NSImageScaling；「拼贴」无公开 API，未纳入，见 CLAUDE.md）
 enum ScalingMode: String, CaseIterable {
     case fill    = "充满屏幕"
@@ -64,25 +59,11 @@ final class WallpaperManager: ObservableObject {
     @Published var current = "—"
     @Published var currentURL: URL?
 
-    /// 自动检查间隔（小时），按间隔模式生效，持久化到 UserDefaults，默认 3
-    @Published var intervalHours: Int {
-        didSet {
-            UserDefaults.standard.set(intervalHours, forKey: "intervalHours")
-            if updateMode == .interval { setupTimer() }
-        }
-    }
-    /// 更新方式：按间隔 / 每天定时，二选一
-    @Published var updateMode: UpdateMode {
-        didSet {
-            UserDefaults.standard.set(updateMode.rawValue, forKey: "updateMode")
-            setupTimer()
-        }
-    }
     /// 每天定时的时刻（24h 制 HH:mm），默认 08:00
     @Published var dailyTime: String {
         didSet {
             UserDefaults.standard.set(dailyTime, forKey: "dailyTime")
-            if updateMode == .daily { setupTimer() }
+            setupTimer()
         }
     }
     /// 近期使用过的定时时刻（最多 3 个，新的在前），作快捷选择
@@ -113,8 +94,6 @@ final class WallpaperManager: ObservableObject {
 
     init() {
         autostart = FileManager.default.fileExists(atPath: AGENT_PLIST.path)   // init 内不触发 didSet
-        intervalHours = UserDefaults.standard.object(forKey: "intervalHours") as? Int ?? 3
-        updateMode    = UpdateMode(rawValue: UserDefaults.standard.string(forKey: "updateMode") ?? "") ?? .interval
         dailyTime     = UserDefaults.standard.string(forKey: "dailyTime") ?? "08:00"
         recentTimes   = UserDefaults.standard.stringArray(forKey: "recentTimes") ?? ["08:00"]
         scalingMode   = ScalingMode(rawValue: UserDefaults.standard.string(forKey: "scalingMode") ?? "") ?? .fill
@@ -129,23 +108,15 @@ final class WallpaperManager: ObservableObject {
         Task { @MainActor in await self.refresh() }
     }
 
-    /// 按更新方式重建定时器（先 invalidate 旧的，避免双定时器）
+    /// 每天定时：一次性定时器到点触发，触发后重排下一天（避免累积漂移，天然跟随修改）
     private func setupTimer() {
         timer?.invalidate()
         timer = nil
-        switch updateMode {
-        case .interval:
-            timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(intervalHours * 3600), repeats: true) { [weak self] _ in
-                Task { @MainActor in await self?.refresh() }
-            }
-        case .daily:
-            // 一次性定时器到点触发，触发后重排下一天（避免累积漂移，天然跟随修改）
-            let wait = max(nextDailyFire().timeIntervalSinceNow, 1)
-            timer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
-                Task { @MainActor in
-                    await self?.refresh()
-                    self?.setupTimer()
-                }
+        let wait = max(nextDailyFire().timeIntervalSinceNow, 1)
+        timer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                await self?.refresh()
+                self?.setupTimer()
             }
         }
     }
@@ -164,36 +135,141 @@ final class WallpaperManager: ObservableObject {
 
     /// 规范化 "H:mm" → "HH:mm"；非法返回 nil
     static func normalizeTime(_ s: String) -> String? {
-        let p = s.trimmingCharacters(in: .whitespaces).split(separator: ":")
-        guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]),
-              (0...23).contains(h), (0...59).contains(m) else { return nil }
-        return String(format: "%02d:%02d", h, m)
+        let raw = s.trimmingCharacters(in: .whitespaces)
+        var h: Int?, m = 0
+        if raw.contains(":") {
+            let p = raw.split(separator: ":")
+            guard p.count == 2, let hh = Int(p[0]), let mm = Int(p[1]) else { return nil }
+            h = hh; m = mm
+        } else {
+            // 容错：用户没输入冒号（如粘贴 0830、或只输小时 8）
+            let digits = raw.filter { $0.isNumber }
+            switch digits.count {
+            case 1, 2: h = Int(digits)
+            case 3:     h = Int(String(digits.prefix(1))); m = Int(String(digits.suffix(2))) ?? 0
+            case 4:     h = Int(String(digits.prefix(2))); m = Int(String(digits.suffix(2))) ?? 0
+            default:    return nil
+            }
+        }
+        guard let hh = h, (0...23).contains(hh), (0...59).contains(m) else { return nil }
+        return String(format: "%02d:%02d", hh, m)
     }
 
-    /// 设每天定时时刻并切到定时模式；同时记入近期使用（去重、最新在前、最多 3 个）
+    /// 设每天定时时刻；同时记入近期使用（去重、最新在前、最多 3 个）
     func setDailyTime(_ t: String) {
         dailyTime = t
-        updateMode = .daily
         recentTimes = ([t] + recentTimes.filter { $0 != t }).prefix(3).map { $0 }
-        status = "更新方式：每天 \(t)"
+        status = "更新时间：每天 \(t)"
+    }
+
+    /// 版本信息，全部从 Info.plist 读取，避免代码里硬编码第二份
+    var versionText: String {
+        let d = Bundle.main.infoDictionary ?? [:]
+        let short = d["CFBundleShortVersionString"] as? String ?? "?"
+        let build = d["CFBundleVersion"] as? String ?? "?"
+        return "\(short)（Build \(build)）"
+    }
+
+    /// 【关于】面板：与自定义时间面板同一套路（自建窗口），放 App 图标
+    func showAbout() {
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 220),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "关于 Bing Wallpaper"
+        win.isReleasedWhenClosed = false
+
+        let view = win.contentView!
+
+        // App 图标（从 bundle 的 AppIcon 读取），整窗居中
+        let iconView = NSImageView(frame: NSRect(x: 138, y: 138, width: 64, height: 64))
+        iconView.image = NSApp.applicationIconImage
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        view.addSubview(iconView)
+
+        let title = NSTextField(labelWithString: "Bing Wallpaper")
+        title.frame = NSRect(x: 20, y: 116, width: 300, height: 20)
+        title.font = .boldSystemFont(ofSize: 15)
+        title.alignment = .center
+        view.addSubview(title)
+
+        let ver = NSTextField(labelWithString: "版本 \(versionText)（测试版）")
+        ver.frame = NSRect(x: 20, y: 96, width: 300, height: 16)
+        ver.font = .systemFont(ofSize: 12)
+        ver.textColor = .secondaryLabelColor
+        ver.alignment = .center
+        view.addSubview(ver)
+
+        let desc = NSTextField(labelWithString: "必应Bing壁纸每日自动更新")
+        desc.frame = NSRect(x: 20, y: 76, width: 300, height: 16)
+        desc.font = .systemFont(ofSize: 12)
+        desc.alignment = .center
+        view.addSubview(desc)
+
+        let detail = NSTextField(labelWithString: "原生 Swift / SwiftUI，无第三方依赖")
+        detail.frame = NSRect(x: 20, y: 52, width: 300, height: 16)
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .tertiaryLabelColor
+        detail.alignment = .center
+        view.addSubview(detail)
+
+        let bridge = AboutBridge(win: win, version: "Bing Wallpaper \(versionText)")
+
+        // 复制 / 好 两个按钮整体居中（110 + 12 + 76 = 198，起点 (340-198)/2 = 71）
+        let copy = NSButton(frame: NSRect(x: 71, y: 16, width: 110, height: 28))
+        copy.title = "复制版本信息"; copy.bezelStyle = .push
+        copy.target = bridge; copy.action = #selector(AboutBridge.copyVersion(_:))
+        view.addSubview(copy)
+
+        let ok = NSButton(frame: NSRect(x: 193, y: 16, width: 76, height: 28))
+        ok.title = "好"; ok.bezelStyle = .push; ok.keyEquivalent = "\r"
+        ok.target = bridge; ok.action = #selector(AboutBridge.close(_:))
+        view.addSubview(ok)
+        win.delegate = bridge
+
+        win.center()
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.runModal(for: win)
     }
 
     /// 弹窗输入每天定时的时分（HH:mm）。
     /// 不用 NSAlert：它强制在最左侧显示 App 图标，且设 icon = nil 无效（会退回默认图标）。
     func askCustomTime() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 124),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 156),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        win.title = "每天定时"
+        win.title = "自定义更新时间"
         win.isReleasedWhenClosed = false
 
         let view = win.contentView!
-        let hint = NSTextField(labelWithString: "24 小时制，格式 HH:mm（例如 08:30）")
-        hint.frame = NSRect(x: 20, y: 78, width: 260, height: 16)
+
+        let title = NSTextField(labelWithString: "自定义更新时间")
+        title.frame = NSRect(x: 20, y: 116, width: 280, height: 20)
+        title.font = .boldSystemFont(ofSize: 13)
+        title.alignment = .center
+        view.addSubview(title)
+
+        let hint = NSTextField(labelWithString: "24 小时制，自动补冒号（例如 0830 → 08:30）")
+        hint.frame = NSRect(x: 20, y: 92, width: 280, height: 16)
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
+        hint.alignment = .center
         view.addSubview(hint)
 
-        let input = NSTextField(frame: NSRect(x: 20, y: 50, width: 260, height: 24))
+        // 输入框宽度刚好容纳 5 个字符（HH:mm）。
+        // macOS 26 起 NSTextField 传统 bezel/焦点环在小尺寸下渲染损坏（边框被裁一半），
+        // 故关闭系统 bezel，用 layer 自绘边框，聚焦时由 delegate 切换为强调色。
+        let input = NSTextField(frame: NSRect(x: 128, y: 54, width: 64, height: 24))
+        input.cell = CenteredTextFieldCell()   // 强制文字垂直居中（macOS 26 无 bezel 偏上 workaround）
+        input.isBordered = false
+        input.isBezeled = false
+        input.drawsBackground = true
+        input.backgroundColor = .controlBackgroundColor
+        input.focusRingType = .none
+        input.wantsLayer = true
+        input.layer?.cornerRadius = 6
+        input.layer?.borderWidth = 1
+        input.layer?.borderColor = NSColor.separatorColor.cgColor
+        input.font = .systemFont(ofSize: 13)
+        input.usesSingleLineMode = true   // 单行 → 文字垂直居中
+        input.alignment = .center         // 时间值水平居中
         input.stringValue = dailyTime
         input.placeholderString = "08:30"
         view.addSubview(input)
@@ -206,13 +282,14 @@ final class WallpaperManager: ObservableObject {
             self?.setDailyTime(t)
         }
         win.delegate = bridge
+        input.delegate = bridge   // 聚焦切换边框颜色
 
-        let cancel = NSButton(frame: NSRect(x: 128, y: 14, width: 76, height: 28))
+        let cancel = NSButton(frame: NSRect(x: 78, y: 16, width: 76, height: 28))
         cancel.title = "取消"; cancel.bezelStyle = .push; cancel.keyEquivalent = "\u{1b}"
         cancel.target = bridge; cancel.action = #selector(TimeInputBridge.cancel(_:))
         view.addSubview(cancel)
 
-        let ok = NSButton(frame: NSRect(x: 204, y: 14, width: 76, height: 28))
+        let ok = NSButton(frame: NSRect(x: 166, y: 16, width: 76, height: 28))
         ok.title = "确定"; ok.bezelStyle = .push; ok.keyEquivalent = "\r"
         ok.target = bridge; ok.action = #selector(TimeInputBridge.ok(_:))
         view.addSubview(ok)
@@ -405,8 +482,39 @@ final class WallpaperManager: ObservableObject {
     }
 }
 
+/// 关于面板的按钮/关闭事件桥接
+private final class AboutBridge: NSObject, NSWindowDelegate {
+    let win: NSWindow
+    let version: String
+    init(win: NSWindow, version: String) { self.win = win; self.version = version }
+
+    @objc func close(_ sender: Any?) {
+        NSApp.stopModal()
+        win.orderOut(nil)
+    }
+    @objc func copyVersion(_ sender: Any?) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(version, forType: .string)
+    }
+    func windowWillClose(_ notification: Notification) { NSApp.stopModal() }
+}
+
+/// 强制文字垂直居中的输入框 cell：macOS 26 下无 bezel 的 NSTextField 单行文字会偏上，
+/// 公开 API 无垂直对齐开关，故重写 drawingRect 让文字在控件高度内垂直居中。
+private final class CenteredTextFieldCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        var r = super.drawingRect(forBounds: rect)
+        let textH = attributedStringValue.size().height
+        if textH < rect.height {
+            r.origin.y = (rect.height - textH) / 2
+            r.size.height = textH
+        }
+        return r
+    }
+}
+
 /// 时间输入面板的按钮/窗口事件桥接（AppKit 的 target-action 要求 NSObject）
-private final class TimeInputBridge: NSObject, NSWindowDelegate {
+private final class TimeInputBridge: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     let win: NSWindow
     let input: NSTextField
     let onOK: (String) -> Void
@@ -423,6 +531,33 @@ private final class TimeInputBridge: NSObject, NSWindowDelegate {
 
     /// 点窗口关闭按钮时也要退出 modal 循环，否则卡死
     func windowWillClose(_ notification: Notification) { NSApp.stopModal() }
+
+    // 聚焦时边框变强调色，失焦恢复分隔线灰（配合 askCustomTime 里的 layer 边框）
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        (obj.object as? NSTextField)?.layer?.borderColor = NSColor.controlAccentColor.cgColor
+    }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        (obj.object as? NSTextField)?.layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    // 实时把输入的数字自动格式化为 HH:mm（每两位自动插冒号，无需手输“:”）
+    @objc func controlTextDidChange(_ obj: Notification) {
+        guard let tf = obj.object as? NSTextField else { return }
+        let masked = Self.maskTime(tf.stringValue)
+        if masked != tf.stringValue { tf.stringValue = masked }
+    }
+
+    /// 纯数字 → HH:mm 掩码：去非数字、最多 4 位、每两位插冒号
+    private static func maskTime(_ raw: String) -> String {
+        let digits = raw.filter { $0.isNumber }.prefix(4)
+        let s = String(digits)
+        switch s.count {
+        case 0:     return ""
+        case 1, 2:  return s               // "8" / "08"（等第 3 位再插冒号）
+        case 3:     return "\(s.prefix(2)):\(s.suffix(1))"
+        default:    return "\(s.prefix(2)):\(s.suffix(2))"
+        }
+    }
 
     private func close() {
         NSApp.stopModal()
@@ -490,42 +625,112 @@ struct PreviewNavButton: View {
     }
 }
 
-/// 子菜单入口行：padding / 行长 / hover 高亮全在样式里，
-/// 字型/图标基线/箭头方向全部用与 MenuRow 完全相同的来源，
-/// 避开 borderlessButton 自动改写字型和图标位置。
-struct RowMenuStyle: MenuStyle {
-    @State private var hovering = false
+// MARK: - 子菜单行（NSMenu 手工弹出：才能在右侧展开 + 整行可点）
 
-    func makeBody(configuration: Configuration) -> some View {
-        Menu(configuration)
-            .frame(maxWidth: .infinity, alignment: .leading)
+struct ContextItem {
+    let title: String
+    let checked: Bool
+    let action: (() -> Void)?
+    let children: [ContextItem]?
+
+    /// 叶子项
+    init(_ title: String, checked: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.checked = checked; self.action = action; self.children = nil
+    }
+    /// 带子菜单的分组项（子菜单也会在右侧级联展开）
+    init(_ title: String, children: [ContextItem]) {
+        self.title = title; self.checked = false; self.action = nil; self.children = children
+    }
+}
+
+/// 透明锚点：只为拿到整行在屏幕上的 frame，用来定位 NSMenu 的弹出位置。
+/// 外观与点击全部交给 SwiftUI（与 MenuRow 完全同一套构建方式），
+/// 避免 NSButton 自带的 image/title 布局破坏图标对齐与字型。
+final class AnchorBox: NSObject { weak var view: NSView? }
+
+struct AnchorReader: NSViewRepresentable {
+    let box: AnchorBox
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        box.view = v
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) { box.view = v }
+}
+
+struct SubmenuRow: View {
+    let icon: String
+    let title: String
+    let items: [ContextItem]
+
+    @State private var hovering = false
+    private let anchor = AnchorBox()
+
+    var body: some View {
+        Button(action: popUp) {
+            HStack(spacing: 6) {
+                Image(systemName: icon).frame(width: 14)
+                Text(title)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.body)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(hovering
                         ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22)
                         : .clear)
             .contentShape(Rectangle())
-            .onHover { hovering = $0 }
-            .buttonStyle(.plain)                  // 压平 default Menu 的浅灰按钮底
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .background(AnchorReader(box: anchor))
+    }
+
+    /// 在整行**右侧**弹出 NSMenu（SwiftUI 顶层 Menu 只能向下，做不到）
+    private func popUp() {
+        guard let v = anchor.view, let win = v.window else { return }
+        let r = win.convertToScreen(v.convert(v.bounds, to: nil))
+        let menu = buildMenu(items)
+        menu.popUp(positioning: nil, at: NSPoint(x: r.maxX, y: r.maxY), in: nil)
+    }
+
+    /// 递归构建；闭包用 ActionBox 装箱进 representedObject，
+    /// 任意层级的项都走同一个 invoke，不依赖 index
+    private func buildMenu(_ list: [ContextItem]) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let c = MenuActions.shared
+        for it in list {
+            let mi = NSMenuItem(title: it.title,
+                                action: it.action == nil ? nil : #selector(MenuActions.invoke(_:)),
+                                keyEquivalent: "")
+            mi.target = it.action == nil ? nil : c
+            mi.state = it.checked ? .on : .off
+            if let act = it.action { mi.representedObject = ActionBox(act) }
+            if let kids = it.children { mi.submenu = buildMenu(kids) }
+            menu.addItem(mi)
+        }
+        return menu
     }
 }
 
-/// 子菜单入口的内容：左图标（与 MenuRow 同宽 14）+ 标题 + 右端 chevron
-struct SubmenuLabel: View {
-    let title: String
-    let icon: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon).frame(width: 14)
-            Text(title)
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .font(.body)
+/// NSMenuItem 的 action 目标（单例，生命周期与 App 同）
+final class MenuActions: NSObject {
+    static let shared = MenuActions()
+    @objc func invoke(_ sender: NSMenuItem) {
+        (sender.representedObject as? ActionBox)?.action()
     }
+}
+
+
+/// 让闭包能塞进 NSMenuItem.representedObject（要求 AnyObject）
+final class ActionBox: NSObject {
+    let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
 }
 
 struct MenuContent: View {
@@ -538,8 +743,18 @@ struct MenuContent: View {
     }
 
     private var updateText: String {
-        if mgr.updateMode == .interval { return "更新方式：每 \(mgr.intervalHours) 小时" }
-        return "更新方式：每天 \(mgr.dailyTime)"
+        "更新时间：每天 \(mgr.dailyTime)"
+    }
+
+    /// 「更新时间」子菜单：近期使用 / 自定义时间…
+    private var updateItems: [ContextItem] {
+        var out: [ContextItem] = mgr.recentTimes.map { t in
+            ContextItem("每天 \(t)", checked: mgr.dailyTime == t) {
+                mgr.setDailyTime(t)
+            }
+        }
+        out.append(ContextItem("自定义时间…") { mgr.askCustomTime() })
+        return out
     }
 
     var body: some View {
@@ -582,57 +797,20 @@ struct MenuContent: View {
 
             Divider()
 
-            Menu {
-                ForEach(ScalingMode.allCases, id: \.rawValue) { m in
-                    Button {
-                        guard mgr.scalingMode != m else { return }
-                        mgr.scalingMode = m
-                        if let u = mgr.currentURL { mgr.setWallpaper(u) }
-                    } label: {
-                        if mgr.scalingMode == m { Label(m.rawValue, systemImage: "checkmark") }
-                        else { Text(m.rawValue) }
-                    }
+            SubmenuRow(icon: "aspectratio",
+                       title: "壁纸填充：\(mgr.scalingMode.rawValue)",
+                       items: ScalingMode.allCases.map { m in
+                ContextItem(m.rawValue, checked: mgr.scalingMode == m) {
+                    guard mgr.scalingMode != m else { return }
+                    mgr.scalingMode = m
+                    if let u = mgr.currentURL { mgr.setWallpaper(u) }
                 }
-            } label: {
-                SubmenuLabel(title: "壁纸填充：\(mgr.scalingMode.rawValue)", icon: "aspectratio")
-            }
-            .menuStyle(RowMenuStyle())
-            .frame(width: 280)
+            })
+            .frame(width: 280, height: 26)
 
-            Menu {
-                Menu("按间隔") {
-                    ForEach([1, 3, 6, 12, 24], id: \.self) { h in
-                        Button {
-                            mgr.intervalHours = h
-                            mgr.updateMode = .interval
-                        } label: {
-                            if mgr.updateMode == .interval && mgr.intervalHours == h {
-                                Label("每 \(h) 小时", systemImage: "checkmark")
-                            } else { Text("每 \(h) 小时") }
-                        }
-                    }
-                }
-                Section("近期使用") {
-                    ForEach(mgr.recentTimes, id: \.self) { t in
-                        Button {
-                            mgr.setDailyTime(t)
-                        } label: {
-                            if mgr.updateMode == .daily && mgr.dailyTime == t {
-                                Label("每天 \(t)", systemImage: "checkmark")
-                            } else { Text("每天 \(t)") }
-                        }
-                    }
-                }
-                Button {
-                    mgr.askCustomTime()
-                } label: {
-                    Label("自定义时间…", systemImage: "pencil")
-                }
-            } label: {
-                SubmenuLabel(title: updateText, icon: "clock")
-            }
-            .menuStyle(RowMenuStyle())
-            .frame(width: 280)
+            // 更新时间：近期使用 / 自定义时间…（子菜单也在右侧级联）
+            SubmenuRow(icon: "clock", title: updateText, items: updateItems)
+                .frame(width: 280, height: 26)
 
             MenuRow("立即检查更新", icon: "arrow.clockwise") { Task { await mgr.refresh() } }
             MenuRow("打开壁纸文件夹", icon: "folder")        { mgr.openFolder() }
@@ -645,6 +823,8 @@ struct MenuContent: View {
                 .padding(.vertical, 6)
 
             Divider()
+
+            MenuRow("关于 Bing Wallpaper", icon: "info.circle") { mgr.showAbout() }
 
             MenuRow("退出") { NSApp.terminate(nil) }
         }

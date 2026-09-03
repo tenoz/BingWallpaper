@@ -1,8 +1,8 @@
 ---
 title: 必应每日壁纸采集 · 项目规则
 created: 2026-09-01
-updated: 2026-09-02
-status: 任务A / 任务B 均已完成
+updated: 2026-09-03
+status: 任务A / 任务B 均已完成；第 7–11 轮 UI 打磨**尚未提交**（等老大确认）
 ---
 
 # 必应每日壁纸采集
@@ -24,6 +24,8 @@ backfill.py              任务 A 历史回填脚本（Python，解析仓库索�
 logo2.jpeg               当前图标源，1632×1632 正方 JPEG
 AppIcon.icns / .iconset  由 logo 生成的图标产物
 build.sh                 一键构建脚本
+package.sh               分发打包脚本（方案 B，产出 dist/ 下的 zip）
+docs/                    面向接手者的补充文档（`backfill-notes.md` 回填实测）
 README.md                面向使用/接手的说明（怎么用、怎么排错）
 CLAUDE.md                本文档（面向 AI 的规则）
 ```
@@ -37,61 +39,48 @@ CLAUDE.md                本文档（面向 AI 的规则）
 脚本 `backfill.py`：解析 GitHub 仓库 `niumoo/bing-wallpaper` 的
 `picture/YYYY-MM/README.md` 索引，拼裸 `_UHD.jpg` 直链下载 2021-02 至今存量。
 
-```bash
-PY=/Users/pxdog/.workbuddy/binaries/python/versions/3.13.12/bin/python3
-$PY backfill.py --dry-run   # 空跑看清单
-$PY backfill.py             # 真跑
-```
-
-- 参数：`--start/--end`（YYYY-MM）、`--dir`、`--workers`（默认 6）、`--dry-run`
-- 断点续传：重跑即跳过已有（按目录文件名 + `downloaded.json` 的**大写 ID** 去重）
-- 索引拉取偶发 SSL 握手超时（68 个月约 3 次），脚本内已重试 3 次
-
-**日期基准（老大 2026-09-02 拍板）**：用仓库原始日期，**不对齐**任务 B 的接口日期。
-后果：现有 16 张比同图的历史命名早 2 天；日期序列仍连续单调，且**不产生重复文件**。
-
-**`downloaded.json` 的处理（分两个阶段，别搞混）**：
-- 回填**过程中**不回写：App 接口窗口仅最近 16 天、与历史图不重叠，本就无需回写；
-  且运行中的 App 会用内存里的旧 manifest 覆盖文件，造成竞态。
-- 回填**完成后**已停 App 一次性合并：**16 → 2038 条**
-  （备份 `/tmp/downloaded.json.bak-20260902-*`，重启后复查仍为 2038，未被覆盖）。
-  此后即便重装 App、清清单或换目录，也不会把历史图重下一遍。
-- 若要重做：先 `pkill -x BingWallpaper`，改完再 `open -a /Applications/BingWallpaper.app`。
-
-**全量实测结果**：68 个月 / 索引 2040 条 / 去重 2035 / 实下 **1994 张，失败 0**，耗时 1h21m。
-独立核验：总计 **2038 张 / 7.14GB**（平均 3.59MB/张），命名不合规范 0、非 JPEG 0、
-`.part` 残留 0、**MD5 重复 0 组、同 ID 重复 0**。App 未受影响（进程存活、清单仍是 16 条）。
-
-日期覆盖 2021-02-01 ~ 2026-09-01，缺 5 天，**均有合理解释、无需补**：
-4 天（2021-03-01/02、2022-10-07、2023-01-26）上游索引本身未收录；
-1 天（2021-08-04）是上游把 `WachsenburgCastle` 重复收录于 07-22 与 08-04，
-按 ID 去重只下一次（文件落在 07-22），属正确行为。
-
-另：2026-08-17/18/20/24 各有一天两张，是两套日期体系撞档（App 接口日 vs 仓库日），
-MD5 确认是**内容不同的两张图**，非重复，无需处理。
+- **结果**：2021-02 ~ 2026-09 共 **1994 张，失败 0**；全库 2038 张 / 7.14GB，MD5 重复 0 组
+- **缺 5 天已核实无需补**（4 天上游未收录 + 1 天上游重复收录被去重）。
+  别再试图补这几天——原因见 `docs/backfill-notes.md`
+- **日期基准（老大 2026-09-02 拍板）**：用仓库原始日期，**不对齐**任务 B 的接口日期。
+  后果：现有 16 张比同图的历史命名早 2 天；序列仍连续单调，**不产生重复文件**
+- 完整实测数据、参数表、`downloaded.json` 两阶段处理 → **`docs/backfill-notes.md`**
 
 ### 任务 B · 菜单栏 App —— 已完成并验证
 `/Applications/BingWallpaper.app`，Swift 原生，功能：
 - 抓最新 Bing 4K 壁纸并下载
 - 按**自身清单**去重，不重复下载
 - **无自动模式**（2026-09-02 老大拍板去掉）：每次检查后固定应用最新一张；随机只保留手动「随机一张」
-- 更新方式二选一（存 `updateMode`）：
-  **按间隔**（1/3/6/12/24 小时，默认 3，存 `intervalHours`）/
-  **每天定时**：弹窗输入 24h 制 `HH:mm`（默认 08:00，存 `dailyTime`），保存最近 3 个
-  使用过的时段（存 `recentTimes`）作快捷选择；一次性定时器到点重排防漂移
+- **更新时间**（2026-09-03 老大拍板，已**移除**早期的「按间隔」二选一）：
+  只有「每天定时」一种，存 `dailyTime`（默认 08:00）。「自定义时间…」弹窗输入时
+  **自动补冒号**（输 `0830` 实时变 `08:30`，不必手输 `:`；只输 1-2 位数字按整点处理），
+  保存最近 3 个使用过的时段（存 `recentTimes`）作快捷选择；一次性定时器到点重排防漂移
 - 壁纸填充方式（存 `scalingMode`，默认充满屏幕）：充满屏幕 / 适合于屏幕 /
   拉伸以充满屏幕 / 居中，映射 `NSImageScaling`，选择后立即对当前壁纸重应用
 - 手动切换：菜单顶部预览图**两侧圆形按钮** = 上一张 / 下一张（从系统当前壁纸反查索引，无状态）
 - 菜单顶部显示当前桌面壁纸预览图（`.window` 样式 + ImageIO 缩略图，maxPixel 560）
-- 子菜单入口（壁纸填充/更新方式）用 `SubmenuLabel`，与普通菜单行同排版
+- **子菜单行（壁纸填充/更新时间）**：SwiftUI 外观 + `AnchorReader` 锚点定位 +
+  `NSMenu.popUp` 手工在**整行右侧**弹出；嵌套子菜单经 `NSMenuItem.submenu` 右侧级联；
+  整行可点。**勿改回 SwiftUI `Menu`（只能向下弹）或 NSButton（外观与 MenuRow 不一致）**
+- 【关于 Bing Wallpaper】面板：App 图标 + 版本（`0.9.0`，从 Info.plist 读）
+  + 说明「必应Bing壁纸每日自动更新」+ 复制版本信息按钮；自建 NSWindow（无 NSAlert 图标）
 - 菜单可手动触发下载
 - 下载目录可手动指定（默认 `/Users/pxdog/Pictures/bing-wallpaper`，存 UserDefaults 的 `picsDir`）
 - 开机启动开关，**默认关闭**
 
+## 版本与分发
+
+- 版本号单一来源：`build.sh` 里的 Info.plist（当前 **0.9.0** 测试版）；关于面板从
+  `Bundle.main.infoDictionary` 读取，不在代码里写第二份
+- **分发 = `package.sh`（方案 B，老大 2026-09-03 选定）**：构建 → 停 App →
+  `ditto` 压 zip 到 `dist/BingWallpaper-<版本>.zip`。无开发者签名，对方需
+  **右键 → 打开**绕 Gatekeeper，仅 arm64。要免拦需 Developer ID 签名 + 公证（未购）
+
 ## 版本管理
 
 git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`（会话记忆）、
-`build/`、`AppIcon.iconset/`、`AppIcon.icns`、`.logo-src.png`（全部可由 logo2.jpeg + build.sh 重建）。
+`build/`、`dist/`、`AppIcon.iconset/`、`AppIcon.icns`、`.logo-src.png`（全部可由 logo2.jpeg + build.sh 重建）。
+**提交前必须先问老大（2026-09-03 定）**
 
 ## 铁律与约定
 
@@ -188,13 +177,17 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
   `a sealed resource is missing or invalid`，删签名重签仍 100% 复现；
   **同一 bundle 在项目目录签名一次通过**。build.sh 因此改为暂存构建+验证后 ditto 搬运。
   排查时用 `plutil -p .../CodeResources | grep cstemp` 认症。
-
-## 待办
-
-- [x] 任务 A：历史回填脚本 `backfill.py`（已建，2021-02 全月 28 张实测通过）
-- [x] 跑任务 A 前确认壁纸目录（`/Users/pxdog/Pictures/bing-wallpaper`）
-- [x] 全量下载收尾：1994 张全部成功，失败 0，已独立核验
-- [x] 重复文件清单：**零重复**（MD5 比对 2038 张，0 组相同）
+- **macOS 26 的 NSTextField 窄边框会被裁一半**（2026-09-03 实测）：系统改走 layer 绘制，
+  legacy `isBordered`/bezel 在小尺寸控件上只画上半截+左侧。解法：关掉
+  `isBordered/isBezeled` + `focusRingType=.none`，用 `wantsLayer` + layer 的
+  `borderWidth/cornerRadius/borderColor` 自绘；聚焦变色走 `NSTextFieldDelegate`
+  的 `controlTextDidBegin/EndEditing`（见 `askCustomTime` / `TimeInputBridge`）。
+- **同样场景下文字不垂直居中**：单行 NSTextField **没有公开的垂直对齐属性**，
+  `usesSingleLineMode` 也兜不住。解法是 `NSTextFieldCell` 子类重写
+  `drawingRect(forBounds:)` 把文字摆到中间（见 `CenteredTextFieldCell`）。
+- **UI 改动别指望在 agent shell 里截图自证**：跑 `NSApp.runModal` 的 GUI 探针进程会被
+  环境 SIGTERM（exit 137）；即便截到图也要**先确认图里真有目标窗口**——曾把拍到 Figma
+  桌面的截图当成"弹窗验证通过"报错结论。模态弹窗样式一律交老大目验。
 
 ## 未决（未排期）
 

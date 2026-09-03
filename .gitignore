@@ -9,3 +9,6 @@ build/
 AppIcon.iconset/
 AppIcon.icns
 .logo-src.png
+
+# 分发包（package.sh 可重建）
+dist/
