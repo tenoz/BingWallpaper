@@ -178,23 +178,49 @@ final class WallpaperManager: ObservableObject {
         status = "更新方式：每天 \(t)"
     }
 
-    /// 弹窗输入每天定时的时分（HH:mm）
+    /// 弹窗输入每天定时的时分（HH:mm）。
+    /// 不用 NSAlert：它强制在最左侧显示 App 图标，且设 icon = nil 无效（会退回默认图标）。
     func askCustomTime() {
-        let alert = NSAlert()
-        alert.messageText = "每天定时时刻"
-        alert.informativeText = "24 小时制，格式 HH:mm（例如 08:30）"
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 124),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "每天定时"
+        win.isReleasedWhenClosed = false
+
+        let view = win.contentView!
+        let hint = NSTextField(labelWithString: "24 小时制，格式 HH:mm（例如 08:30）")
+        hint.frame = NSRect(x: 20, y: 78, width: 260, height: 16)
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+        view.addSubview(hint)
+
+        let input = NSTextField(frame: NSRect(x: 20, y: 50, width: 260, height: 24))
         input.stringValue = dailyTime
-        alert.accessoryView = input
-        alert.addButton(withTitle: "确定")
-        alert.addButton(withTitle: "取消")
-        NSApp.activate(ignoringOtherApps: true)   // LSUIElement App 需主动激活
-        guard alert.runModal() == .alertFirstButtonReturn,
-              let t = Self.normalizeTime(input.stringValue) else {
-            status = "已取消，时间格式须为 HH:mm"
-            return
+        input.placeholderString = "08:30"
+        view.addSubview(input)
+
+        let bridge = TimeInputBridge(win: win, input: input) { [weak self] v in
+            guard let t = Self.normalizeTime(v) else {
+                self?.status = "时间格式无效：\(v)（须 HH:mm）"
+                return
+            }
+            self?.setDailyTime(t)
         }
-        setDailyTime(t)
+        win.delegate = bridge
+
+        let cancel = NSButton(frame: NSRect(x: 128, y: 14, width: 76, height: 28))
+        cancel.title = "取消"; cancel.bezelStyle = .push; cancel.keyEquivalent = "\u{1b}"
+        cancel.target = bridge; cancel.action = #selector(TimeInputBridge.cancel(_:))
+        view.addSubview(cancel)
+
+        let ok = NSButton(frame: NSRect(x: 204, y: 14, width: 76, height: 28))
+        ok.title = "确定"; ok.bezelStyle = .push; ok.keyEquivalent = "\r"
+        ok.target = bridge; ok.action = #selector(TimeInputBridge.ok(_:))
+        view.addSubview(ok)
+
+        win.center()
+        NSApp.activate(ignoringOtherApps: true)   // LSUIElement App 需主动激活
+        win.makeFirstResponder(input)
+        NSApp.runModal(for: win)                  // bridge 在本作用域存活至 modal 结束
     }
 
     // MARK: 抓取与下载
@@ -379,6 +405,31 @@ final class WallpaperManager: ObservableObject {
     }
 }
 
+/// 时间输入面板的按钮/窗口事件桥接（AppKit 的 target-action 要求 NSObject）
+private final class TimeInputBridge: NSObject, NSWindowDelegate {
+    let win: NSWindow
+    let input: NSTextField
+    let onOK: (String) -> Void
+
+    init(win: NSWindow, input: NSTextField, onOK: @escaping (String) -> Void) {
+        self.win = win; self.input = input; self.onOK = onOK
+    }
+
+    @objc func ok(_ sender: Any?) {
+        close()
+        onOK(input.stringValue)
+    }
+    @objc func cancel(_ sender: Any?) { close() }
+
+    /// 点窗口关闭按钮时也要退出 modal 循环，否则卡死
+    func windowWillClose(_ notification: Notification) { NSApp.stopModal() }
+
+    private func close() {
+        NSApp.stopModal()
+        win.orderOut(nil)
+    }
+}
+
 // MARK: - 菜单（window 样式：顶部可放壁纸预览图）
 
 /// 用 ImageIO 生成小尺寸缩略图，避免整张 4K 解码占内存
@@ -408,6 +459,7 @@ struct MenuRow: View {
                 Text(title)
                 Spacer()
             }
+            .font(.body)          // 与子菜单行为同一套字型，避免被按钮样式改写
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(hovering ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22) : .clear)
@@ -455,17 +507,21 @@ struct RowMenuStyle: MenuStyle {
     }
 }
 
+/// 子菜单入口的内容：左图标（与 MenuRow 同宽 14）+ 标题 + 右端 chevron
 struct SubmenuLabel: View {
     let title: String
+    let icon: String
 
     var body: some View {
         HStack(spacing: 6) {
+            Image(systemName: icon).frame(width: 14)
             Text(title)
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
+        .font(.body)
     }
 }
 
@@ -535,7 +591,7 @@ struct MenuContent: View {
                     }
                 }
             } label: {
-                SubmenuLabel(title: "壁纸填充：\(mgr.scalingMode.rawValue)")
+                SubmenuLabel(title: "壁纸填充：\(mgr.scalingMode.rawValue)", icon: "aspectratio")
             }
             .menuStyle(RowMenuStyle())
             .frame(width: 280)
@@ -570,7 +626,7 @@ struct MenuContent: View {
                     Label("自定义时间…", systemImage: "pencil")
                 }
             } label: {
-                SubmenuLabel(title: updateText)
+                SubmenuLabel(title: updateText, icon: "clock")
             }
             .menuStyle(RowMenuStyle())
             .frame(width: 280)

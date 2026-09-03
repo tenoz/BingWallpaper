@@ -168,6 +168,14 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 - **「拼贴」无公开 API**：`setDesktopImageURL` 选项仅 scaling / allowClipping / fillColor，
   系统设置的拼贴走私有 WallpaperKit。要支持只能预合成拼贴大图再以充满屏幕应用，
   代价：桌面 URL 变成合成文件，上一张/下一张导航失效（见"未决"）。
+- **NSAlert 的 App 图标去不掉**：`icon` 声明为 `NSImage!`，**赋 nil 无效**（nil = 用默认
+  App 图标），只能塞 1×1 透明图占位（丑）。要无图标的自定输入面板 → 自建 `NSWindow`
+  + `NSApp.runModal(for:)`（见 `askCustomTime` / `TimeInputBridge`）。
+  ⚠️ 自建 modal 必须同时处理点关闭按钮：`NSWindowDelegate.windowWillClose` 里 `stopModal()`，
+  否则 modal 循环卡死。
+- **子菜单只能在右侧级联，前提是它本身是某个 NSMenu 的子项**：MenuBarExtra(.window)
+  面板里的**顶层** `Menu` 只能向下弹出，SwiftUI 没有改变弹出方向的 API。
+  想让它向右展开，就得给它套一个父级 Menu（多一层点击）。
 - **/Applications 原地 ad-hoc 签名会产坏 seal（macOS 26 实测）**：`codesign -s -` 对
   /Applications 下的 bundle 签名后，`CodeResources` 的 files2 把主程序记成
   `MacOS/BingWallpaper.cstemp`（签名临时文件名），`codesign -v` 报
