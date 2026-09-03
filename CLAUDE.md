@@ -82,6 +82,19 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 `build/`、`dist/`、`AppIcon.iconset/`、`AppIcon.icns`、`.logo-src.png`（全部可由 logo2.jpeg + build.sh 重建）。
 **提交前必须先问老大（2026-09-03 定）**
 
+- **远端（2026-09-03 建并首推）**：`https://github.com/tenoz/BingWallpaper.git`，私有仓库
+
+**推送认证（两个坑，都踩过）**：
+- GitHub 的 git 通道**不认 `Authorization: Bearer`**（报 `invalid credentials`），
+  只认 Basic：用户名填 `x-access-token`、密码填 PAT。PAT 存 `~/.github_bw_pat`（600，30 天有效）。
+- ⚠️ 推送**必须绕过本机代理**：环境里 `http_proxy`/`https_proxy` 指向 `127.0.0.1:59218`，
+  走它会 `CONNECT tunnel failed, response 502`（且时好时坏）。绕法：
+  ```bash
+  env http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
+      GIT_ASKPASS=<返回 x-access-token / 读 ~/.github_bw_pat 的脚本> git push
+  ```
+  令牌**不写进 `.git/config`**——remote 保持干净的 `https://github.com/...` 地址。
+
 ## 铁律与约定
 
 1. **图片命名**：`YYYY-MM-DD_OHR.图片名.jpg`，平铺在壁纸目录。
