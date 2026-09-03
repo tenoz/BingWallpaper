@@ -176,6 +176,12 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 - **子菜单只能在右侧级联，前提是它本身是某个 NSMenu 的子项**：MenuBarExtra(.window)
   面板里的**顶层** `Menu` 只能向下弹出，SwiftUI 没有改变弹出方向的 API。
   想让它向右展开，就得给它套一个父级 Menu（多一层点击）。
+- **MenuBarExtra(.window) 里 Menu 的视觉差异**：`borderlessButton` 会改写
+  标签的**字型字重 + 垂直基线 + 右侧箭头方向**（箭头会按子菜单的弹出方向自动
+  旋转为 ▾），覆盖了 `.font(.body)` 也会发现字型/字重仍不同；其它图标对比
+  起来就是"水平不对齐"。要去掉这些自动改写 → **完全不用 borderlessButton**，
+  `Menu(configuration)` 后直接挂 padding/background/hover（见 `RowMenuStyle`）。
+  此模式 `>` 方向由你自己在 `SubmenuLabel` 画（chevron.right 不会被覆盖）。
 - **/Applications 原地 ad-hoc 签名会产坏 seal（macOS 26 实测）**：`codesign -s -` 对
   /Applications 下的 bundle 签名后，`CodeResources` 的 files2 把主程序记成
   `MacOS/BingWallpaper.cstemp`（签名临时文件名），`codesign -v` 报

@@ -490,20 +490,23 @@ struct PreviewNavButton: View {
     }
 }
 
-/// 子菜单入口行：padding / 行长 / hover 高亮全在样式里，与 MenuRow 用同一套数值，
-/// 保证「壁纸填充」「更新方式」两行与普通菜单行严格对齐
+/// 子菜单入口行：padding / 行长 / hover 高亮全在样式里，
+/// 字型/图标基线/箭头方向全部用与 MenuRow 完全相同的来源，
+/// 避开 borderlessButton 自动改写字型和图标位置。
 struct RowMenuStyle: MenuStyle {
     @State private var hovering = false
 
     func makeBody(configuration: Configuration) -> some View {
         Menu(configuration)
-            .menuStyle(.borderlessButton)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(hovering ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22) : .clear)
+            .background(hovering
+                        ? Color(nsColor: .selectedContentBackgroundColor).opacity(0.22)
+                        : .clear)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
+            .buttonStyle(.plain)                  // 压平 default Menu 的浅灰按钮底
     }
 }
 
