@@ -45,6 +45,12 @@ open -a /Applications/BingWallpaper.app
 
 ---
 
+## 源码仓库
+
+<https://github.com/tenoz/BingWallpaper>（**私有仓库**，需有访问权限）
+
+---
+
 ## 目录与文件
 
 | 路径 | 用途 |

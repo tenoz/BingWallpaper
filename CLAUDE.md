@@ -2,7 +2,7 @@
 title: 必应每日壁纸采集 · 项目规则
 created: 2026-09-01
 updated: 2026-09-03
-status: 任务A / 任务B 均已完成；第 7–11 轮 UI 打磨**尚未提交**（等老大确认）
+status: 任务A / 任务B 均已完成；第 7–11 轮改动已于 2026-09-03 提交并推送到私有仓库
 ---
 
 # 必应每日壁纸采集
@@ -83,17 +83,10 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 **提交前必须先问老大（2026-09-03 定）**
 
 - **远端（2026-09-03 建并首推）**：`https://github.com/tenoz/BingWallpaper.git`，私有仓库
-
-**推送认证（两个坑，都踩过）**：
-- GitHub 的 git 通道**不认 `Authorization: Bearer`**（报 `invalid credentials`），
-  只认 Basic：用户名填 `x-access-token`、密码填 PAT。PAT 存 `~/.github_bw_pat`（600，30 天有效）。
-- ⚠️ 推送**必须绕过本机代理**：环境里 `http_proxy`/`https_proxy` 指向 `127.0.0.1:59218`，
-  走它会 `CONNECT tunnel failed, response 502`（且时好时坏）。绕法：
-  ```bash
-  env http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
-      GIT_ASKPASS=<返回 x-access-token / 读 ~/.github_bw_pat 的脚本> git push
-  ```
-  令牌**不写进 `.git/config`**——remote 保持干净的 `https://github.com/...` 地址。
+- **推送两个坑（必踩）**：① git 通道**只认 Basic**（`x-access-token` + PAT），
+  用 Bearer 头报 `invalid credentials`；② **必须绕过本机代理**
+  （`http_proxy` 指向 `127.0.0.1:59218`，走它报 `CONNECT tunnel failed, 502`）。
+  完整步骤、askpass 脚本、令牌管理 → **`docs/git-and-remote.md`**
 
 ## 铁律与约定
 
