@@ -83,10 +83,11 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 **提交前必须先问老大（2026-09-03 定）**
 
 - **远端（2026-09-03 建并首推）**：`https://github.com/tenoz/BingWallpaper.git`，私有仓库
-- **推送两个坑（必踩）**：① git 通道**只认 Basic**（`x-access-token` + PAT），
+- **推送两个坑（换机器/新环境必踩）**：① git 通道**只认 Basic**（`x-access-token` + PAT），
   用 Bearer 头报 `invalid credentials`；② **必须绕过本机代理**
   （`http_proxy` 指向 `127.0.0.1:59218`，走它报 `CONNECT tunnel failed, 502`）。
-  完整步骤、askpass 脚本、令牌管理 → **`docs/git-and-remote.md`**
+  本机 2026-09-04 已配好钥匙串凭据 + github 代理例外，**日常直接 `git push` 即可**；
+  重建步骤与备用方案 → **`docs/git-and-remote.md`**
 
 ## 铁律与约定
 

@@ -27,6 +27,28 @@ printf '%s' 'ghp_你的令牌' > ~/.github_bw_pat && chmod 600 ~/.github_bw_pat
 
 ### 怎么推
 
+**已经配置好了，日常直接 `git push` 即可**，不用任何临时脚本。
+
+#### 已做的两处全局配置（2026-09-04）
+
+```bash
+git config --global credential.helper osxkeychain   # 凭据存进 macOS 钥匙串
+git config --global http.https://github.com/.proxy ""  # github.com 不走代理
+```
+
+再把令牌一次性存进钥匙串（用户名必须是 `x-access-token`）：
+
+```bash
+TOKEN=$(tr -d '\n' < ~/.github_bw_pat)
+printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n' \
+  "$TOKEN" | git credential-osxkeychain store
+```
+
+令牌本体存在系统钥匙串里（由 macOS 加密管理），**不进 `.git/config`**，
+远端地址也保持干净的 `https://github.com/...`。
+
+#### 为什么需要这两条（都踩过）
+
 **坑一：git 通道只认 Basic 认证，不认 Bearer 头。**
 用 `Authorization: Bearer` 会报 `invalid credentials`。必须走 Basic：
 用户名填 `x-access-token`，密码填令牌。
@@ -36,7 +58,9 @@ printf '%s' 'ghp_你的令牌' > ~/.github_bw_pat && chmod 600 ~/.github_bw_pat
 git 走它会报 `CONNECT tunnel failed, response 502`（而且时好时坏，
 同一时刻 curl 直连是通的，容易误判成网络问题）。
 
-把下面这段存成脚本用即可（令牌不进 `.git/config`，远端地址保持干净）：
+#### 换机器或配置丢失时（备用方案）
+
+不想改全局配置的话，用 askpass 临时顶一下：
 
 ```bash
 cat > /tmp/gh_askpass.sh <<'EOF'
