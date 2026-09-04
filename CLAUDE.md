@@ -55,6 +55,10 @@ CLAUDE.md                本文档（面向 AI 的规则）
   只有「每天定时」一种，存 `dailyTime`（默认 08:00）。「自定义时间…」弹窗输入时
   **自动补冒号**（输 `0830` 实时变 `08:30`，不必手输 `:`；只输 1-2 位数字按整点处理），
   保存最近 3 个使用过的时段（存 `recentTimes`）作快捷选择；一次性定时器到点重排防漂移
+- **检查触发点**（2026-09-04 新增兜底）：除每天 `dailyTime` 定点外，`App 冷启动`
+  （`init` 里的 `refresh()`）与 `电脑唤醒`（`NSWorkspace.didWakeNotification` →
+  `registerWakeObserver`）也会各触发一次检查，接住「定时那次被 App Nap 拖住 / 漏抓晚发的图」；
+  按清单去重，重复触发不重复下载。主体仍是「每天定时查一次」，非新增自动模式
 - 壁纸填充方式（存 `scalingMode`，默认充满屏幕）：充满屏幕 / 适合于屏幕 /
   拉伸以充满屏幕 / 居中，映射 `NSImageScaling`，选择后立即对当前壁纸重应用
 - 手动切换：菜单顶部预览图**两侧圆形按钮** = 上一张 / 下一张（从系统当前壁纸反查索引，无状态）
@@ -190,16 +194,32 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
   `borderWidth/cornerRadius/borderColor` 自绘；聚焦变色走 `NSTextFieldDelegate`
   的 `controlTextDidBegin/EndEditing`（见 `askCustomTime` / `TimeInputBridge`）。
 - **同样场景下文字不垂直居中**：单行 NSTextField **没有公开的垂直对齐属性**，
-  `usesSingleLineMode` 也兜不住。解法是 `NSTextFieldCell` 子类重写
-  `drawingRect(forBounds:)` 把文字摆到中间（见 `CenteredTextFieldCell`）。
+  `usesSingleLineMode` 也兜不住。两层都要修：
+  ① 非编辑态（显示）用 `NSTextFieldCell` 子类重写 `drawingRect(forBounds:)` 把文字摆中间
+  （见 `CenteredTextFieldCell`）；
+  ② **编辑态**点进去打字后改由 field editor（`NSTextView`）接管绘制，`drawingRect`
+  不再生效、文字会偏上，须在 `NSTextField` 子类 `becomeFirstResponder()` 里拿
+  `currentEditor()` 设 `textContainerInset` 顶部偏移补偿（见 `CenteredTextField`）。
+  漏掉 ② 就是"能编辑但字偏上"。
 - **UI 改动别指望在 agent shell 里截图自证**：跑 `NSApp.runModal` 的 GUI 探针进程会被
   环境 SIGTERM（exit 137）；即便截到图也要**先确认图里真有目标窗口**——曾把拍到 Figma
   桌面的截图当成"弹窗验证通过"报错结论。模态弹窗样式一律交老大目验。
+- **menu bar App 自建 modal 窗口里的 NSTextField 无法编辑**（2026-09-04 实测修复）：
+  App 是 `LSUIElement`（activationPolicy=.accessory），其窗口在 App 非激活态无法成为
+  key window，而 NSTextField 必须在 key window 中才能进编辑模式；`runModal(for:)`
+  内部的 `makeKeyAndOrderFront` 因 app 非激活被系统忽略 → 表现为"按钮能点、输入框打不进字"。
+  解：弹窗前临时 `NSApp.setActivationPolicy(.regular)`（LSUIElement 保证 Dock 不露图标），
+  `runModal` 结束后还原 `.accessory`；并补 `makeKeyAndOrderFront` + `makeFirstResponder`，
+  input 也显式 `isEditable/isSelectable`（见 `askCustomTime`）。
+  ⚠️ GUI 文本可编辑性无法在 agent shell 验证（runModal 探针会被 SIGTERM），一律交老大目验。
 
 ## 未决（未排期）
 
-- 菜单栏图标是否换成 logo —— **未排期**。触发条件：老大提供纯黑单色剪影版素材
+- 菜单栏图标是否换成 logo —— **老大 2026-09-04 决定：暂时保持现状**（继续用
+  SF Symbol `photo`）。真要换，触发条件仍是提供纯黑单色剪影版素材
   （全彩 logo 缩到 18px 会糊；macOS 菜单栏图标惯例走单色模板模式）
 - 壁纸填充第五种「拼贴」—— **未排期**。公开 API 不支持（见"已知的坑"），
   可行方案是预合成拼贴大图 + 充满屏幕应用，会破坏上一张/下一张导航。
-  触发条件：老大确认真的需要拼贴 4K 图（4K 图拼 4K 屏 ≈ 居中，实际意义存疑）。
+  **实际意义也存疑**：我们的图本身就是 4K，4K 屏上拼贴 = 一张刚好铺满（≈ 居中），
+  小屏则只显示左上角局部，两种情况下平铺效果都看不出来。
+  触发条件：老大确认真的需要（比如将来要铺低分辨率小图）。

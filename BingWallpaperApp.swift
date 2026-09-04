@@ -75,6 +75,7 @@ final class WallpaperManager: ObservableObject {
         didSet { UserDefaults.standard.set(scalingMode.rawValue, forKey: "scalingMode") }
     }
     private var timer: Timer?
+    private var wakeToken: NSObjectProtocol?
 
     /// 下载目录：可手动指定，默认 DEFAULT_PICS_DIR，选择后持久化到 UserDefaults
     @Published var picsDir: URL {
@@ -105,6 +106,7 @@ final class WallpaperManager: ObservableObject {
            let arr = try? JSONSerialization.jsonObject(with: d) as? [String] { manifest = Set(arr) }
         refreshCurrentName()
         setupTimer()
+        registerWakeObserver()
         Task { @MainActor in await self.refresh() }
     }
 
@@ -131,6 +133,20 @@ final class WallpaperManager: ObservableObject {
         c.minute = m
         let t = Calendar.current.date(from: c) ?? Date().addingTimeInterval(86400)
         return t > Date() ? t : t.addingTimeInterval(86400)
+    }
+
+    /// 电脑从睡眠唤醒时自动检查一次。菜单栏 App 长期不活跃，一次性定时器可能被 App Nap 推迟，
+    /// 唤醒后主动补一次最稳。refresh 按清单去重，重复唤醒不会重复下载；顺手重排每日定时器，
+    /// 避免长睡眠后错过当天的点。
+    private func registerWakeObserver() {
+        wakeToken = NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                await self?.refresh()
+                self?.setupTimer()
+            }
+        }
     }
 
     /// 规范化 "H:mm" → "HH:mm"；非法返回 nil
@@ -256,7 +272,7 @@ final class WallpaperManager: ObservableObject {
         // 输入框宽度刚好容纳 5 个字符（HH:mm）。
         // macOS 26 起 NSTextField 传统 bezel/焦点环在小尺寸下渲染损坏（边框被裁一半），
         // 故关闭系统 bezel，用 layer 自绘边框，聚焦时由 delegate 切换为强调色。
-        let input = NSTextField(frame: NSRect(x: 128, y: 54, width: 64, height: 24))
+        let input = CenteredTextField(frame: NSRect(x: 128, y: 54, width: 64, height: 24))
         input.cell = CenteredTextFieldCell()   // 强制文字垂直居中（macOS 26 无 bezel 偏上 workaround）
         input.isBordered = false
         input.isBezeled = false
@@ -270,6 +286,8 @@ final class WallpaperManager: ObservableObject {
         input.font = .systemFont(ofSize: 13)
         input.usesSingleLineMode = true   // 单行 → 文字垂直居中
         input.alignment = .center         // 时间值水平居中
+        input.isEditable = true            // 显式开编辑（menu bar 为 accessory，弹窗非 key 时易失效）
+        input.isSelectable = true
         input.stringValue = dailyTime
         input.placeholderString = "08:30"
         view.addSubview(input)
@@ -295,9 +313,17 @@ final class WallpaperManager: ObservableObject {
         view.addSubview(ok)
 
         win.center()
-        NSApp.activate(ignoringOtherApps: true)   // LSUIElement App 需主动激活
+        // 菜单栏 App（LSUIElement）默认是 accessory，窗口在非激活态无法成为 key window，
+        // 导致 NSTextField 拿不到键盘焦点、无法编辑（按钮照常可点）。
+        // 临时升到 .regular 让弹窗真正成为 key window；LSUIElement 保证 Dock 不露图标；
+        // modal 结束后还原 .accessory，菜单栏不受影响。
+        let wasAccessory = NSApp.activationPolicy() == .accessory
+        if wasAccessory { NSApp.setActivationPolicy(.regular) }
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
         win.makeFirstResponder(input)
         NSApp.runModal(for: win)                  // bridge 在本作用域存活至 modal 结束
+        if wasAccessory { NSApp.setActivationPolicy(.accessory) }
     }
 
     // MARK: 抓取与下载
@@ -510,6 +536,22 @@ private final class CenteredTextFieldCell: NSTextFieldCell {
             r.size.height = textH
         }
         return r
+    }
+}
+
+/// 编辑态（field editor 接管绘制）也要垂直居中：`CenteredTextFieldCell.drawingRect`
+/// 只解决非编辑态显示，进入编辑后由 NSTextView 负责绘制，需用 `textContainerInset`
+/// 顶部补偿上偏移，否则 macOS 26 下输入文字会偏上。
+private final class CenteredTextField: NSTextField {
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        if let editor = currentEditor() as? NSTextView {
+            let lineH = (editor.font.flatMap { editor.layoutManager?.defaultLineHeight(for: $0) })
+                      ?? (self.font?.boundingRectForFont.height ?? bounds.height)
+            let inset = max(0, (bounds.height - lineH) / 2)
+            editor.textContainerInset = NSSize(width: 0, height: inset)
+        }
+        return true
     }
 }
 
