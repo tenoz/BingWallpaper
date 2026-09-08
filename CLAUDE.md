@@ -1,8 +1,8 @@
 ---
 title: 必应每日壁纸采集 · 项目规则
 created: 2026-09-01
-updated: 2026-09-03
-status: 任务A / 任务B 均已完成；第 7–11 轮改动已于 2026-09-03 提交并推送到私有仓库
+updated: 2026-09-08
+status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改动**尚未提交**（待老大确认）
 ---
 
 # 必应每日壁纸采集
@@ -17,18 +17,17 @@ status: 任务A / 任务B 均已完成；第 7–11 轮改动已于 2026-09-03 �
 | **数据/图片** | `/Users/pxdog/Pictures/bing-wallpaper/` | 壁纸存放地（**可在 App 菜单里改**） |
 | **产物 App** | `/Applications/BingWallpaper.app` | 编译后的菜单栏应用 |
 
-项目目录内容：
-```
-BingWallpaperApp.swift   源码（Swift，SwiftUI MenuBarExtra）
-backfill.py              任务 A 历史回填脚本（Python，解析仓库索引批量下载）
-logo2.jpeg               当前图标源，1632×1632 正方 JPEG
-AppIcon.icns / .iconset  由 logo 生成的图标产物
-build.sh                 一键构建脚本
-package.sh               分发打包脚本（方案 B，产出 dist/ 下的 zip）
-docs/                    面向接手者的补充文档（`backfill-notes.md` 回填实测）
-README.md                面向使用/接手的说明（怎么用、怎么排错）
-CLAUDE.md                本文档（面向 AI 的规则）
-```
+项目目录：`BingWallpaperApp.swift`（源码）、`backfill.py`（回填）、`build.sh` / `package.sh`、
+`logo2.jpeg` + `AppIcon.*`（图标产物，可由 build.sh 重建）、`docs/`、`README.md`、`CLAUDE.md`（本文档）。
+
+### 深入文档（docs/ 指针表）
+
+| 文件 | 什么时候读 |
+|---|---|
+| `docs/backfill-notes.md` | 要跑 / 要改历史回填 `backfill.py` 时 |
+| `docs/appkit-pitfalls.md` | 要动 GUI 时（自建 modal 输入、菜单栏菜单、图标、签名） |
+| `docs/decisions-and-lessons.md` | 想知道「这条约定为什么这么定」时 |
+| `docs/git-and-remote.md` | 换机器 / 推送认证失败时 |
 
 > 受众区分：`README.md` 讲"怎么用、怎么排错"，本文档讲"改代码时必须遵守什么"。
 > 两者不互相抄全文。
@@ -36,12 +35,10 @@ CLAUDE.md                本文档（面向 AI 的规则）
 ## 两个彼此独立的任务
 
 ### 任务 A · 历史回填 —— 已完成（2026-09-02）
-脚本 `backfill.py`：解析 GitHub 仓库 `niumoo/bing-wallpaper` 的
-`picture/YYYY-MM/README.md` 索引，拼裸 `_UHD.jpg` 直链下载 2021-02 至今存量。
+脚本 `backfill.py`：解析 GitHub 仓库 `niumoo/bing-wallpaper` 的月度 README 索引，
+拼裸 `_UHD.jpg` 直链下载 2021-02 至今存量。结果 **1994 张、失败 0**（全库 2038 张 / 7.14GB）。
 
-- **结果**：2021-02 ~ 2026-09 共 **1994 张，失败 0**；全库 2038 张 / 7.14GB，MD5 重复 0 组
-- **缺 5 天已核实无需补**（4 天上游未收录 + 1 天上游重复收录被去重）。
-  别再试图补这几天——原因见 `docs/backfill-notes.md`
+- **缺 5 天已核实无需补**（4 天上游未收录 + 1 天上游重复收录被去重），别再试图补——见 `docs/backfill-notes.md`
 - **日期基准（老大 2026-09-02 拍板）**：用仓库原始日期，**不对齐**任务 B 的接口日期。
   后果：现有 16 张比同图的历史命名早 2 天；序列仍连续单调，**不产生重复文件**
 - 完整实测数据、参数表、`downloaded.json` 两阶段处理 → **`docs/backfill-notes.md`**
@@ -54,10 +51,12 @@ CLAUDE.md                本文档（面向 AI 的规则）
 - **更新时间**（2026-09-03 老大拍板，已**移除**早期的「按间隔」二选一）：
   只有「每天定时」一种，存 `dailyTime`（默认 08:00）。「自定义时间…」弹窗输入时
   **自动补冒号**（输 `0830` 实时变 `08:30`，不必手输 `:`；只输 1-2 位数字按整点处理），
-  保存最近 3 个使用过的时段（存 `recentTimes`）作快捷选择；一次性定时器到点重排防漂移
-- **检查触发点**（2026-09-04 新增兜底）：除每天 `dailyTime` 定点外，`App 冷启动`
-  （`init` 里的 `refresh()`）与 `电脑唤醒`（`NSWorkspace.didWakeNotification` →
-  `registerWakeObserver`）也会各触发一次检查，接住「定时那次被 App Nap 拖住 / 漏抓晚发的图」；
+  保存最近 3 个使用过的时段（存 `recentTimes`）作快捷选择。
+  ⚠️ **定时实现是「每分钟轮询 + `lastDailyCheck` 日期标记」，不是一次性定时器**
+  （2026-09-08 改，见"已知的坑"）：到点后当天只跑一次，错过/被挂起也能在下分钟补跑
+- **检查触发点**：① 每天过 `dailyTime` 后的**定点检查**（轮询判断，当天只跑一次）；
+  ② `App 冷启动`（`init` 里的 `refresh()`）；③ `电脑唤醒`（`didWakeNotification`）。
+  ②③ 是兜底，**不写 `lastDailyCheck`**——否则早上冷启动跑过就占掉当天的定点机会。
   按清单去重，重复触发不重复下载。主体仍是「每天定时查一次」，非新增自动模式
 - 壁纸填充方式（存 `scalingMode`，默认充满屏幕）：充满屏幕 / 适合于屏幕 /
   拉伸以充满屏幕 / 居中，映射 `NSImageScaling`，选择后立即对当前壁纸重应用
@@ -145,12 +144,18 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
   报 `5: Input/output error`），读操作正常。根因是 shell 不在 GUI 会话上下文。
   **要改 launchd 注册状态，交给 App 自身（GUI 进程）调 launchctl。**
 - 环境：macOS 26.6.2 Tahoe / arm64 / 完整 Xcode（swiftc 6.3.3）/ 磁盘剩余 157GB
+- **抓取主机一律用 `cn.bing.com`，别用 `www.bing.com`**（2026-09-05 实测）：国内直连
+  `www.bing.com` 会被断流（SSL_ERROR_SYSCALL，接口 + `/th?id=` 图片 CDN 一起挂），
+  `cn.bing.com` 稳定且数据与 www 完全一致（startdate / 图片 ID 相同，不影响去重键）。
+  源码 `candidates()` 两处 URL 均已走 cn，勿改回 www。
+- **Bing 当天图发布晚于早上**（2026-09-05 / 09-06 / 09-08 三次观察一致）：zh-CN 接口在早上
+  查到的最新 `startdate` 常仍是**前一天**（09-08 早上查到的是 09-07 的图）。
+  后果：**设 09:30 定点也必然慢一天**，「一早看到当天新图」靠调时刻解决不了。
+  另：`backfill.py` 目前仍写 `www.bing.com`（与上方铁律不符，属已知待改项）——
+  要续传回填前先改成 cn，否则会重演 2026-09-05 的整轮断流。
 
 ## 已知的坑（都踩过，别再踩）
 
-- **图标生成**：`sips` 从 jpeg 源输出 `.png` 时**只改后缀不改编码**，
-  `iconutil` 会报 `Failed to generate ICNS`。
-  **必须先用 `sips -s format png` 把源转成真 PNG，再生成各尺寸。**
 - **别信壁纸 `Index.plist` 的 `LastSet` 字段**：那是「系统设置」App 的记账字段，
   不走 NSWorkspace 更新。设完壁纸后它仍显示旧日期，极易误判为"没生效"。
   验证壁纸请写 Swift 探针读 `NSWorkspace.shared.desktopImageURL(for:)`。
@@ -165,59 +170,38 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
   在本 SDK（swiftc 6.3.3）**没有**导入为 `NSWorkspace.DesktopImageOptionKey.scaling`
   等成员（`.scalingKey` 变体也不存在），但类型改名通知又指向该类型。
   **用 `init(rawValue: "NSWorkspaceDesktopImageScalingKey")` 构造**（实测可用）。
-- **「拼贴」无公开 API**：`setDesktopImageURL` 选项仅 scaling / allowClipping / fillColor，
-  系统设置的拼贴走私有 WallpaperKit。要支持只能预合成拼贴大图再以充满屏幕应用，
-  代价：桌面 URL 变成合成文件，上一张/下一张导航失效（见"未决"）。
-- **NSAlert 的 App 图标去不掉**：`icon` 声明为 `NSImage!`，**赋 nil 无效**（nil = 用默认
-  App 图标），只能塞 1×1 透明图占位（丑）。要无图标的自定输入面板 → 自建 `NSWindow`
-  + `NSApp.runModal(for:)`（见 `askCustomTime` / `TimeInputBridge`）。
-  ⚠️ 自建 modal 必须同时处理点关闭按钮：`NSWindowDelegate.windowWillClose` 里 `stopModal()`，
-  否则 modal 循环卡死。
-- **子菜单只能在右侧级联，前提是它本身是某个 NSMenu 的子项**：MenuBarExtra(.window)
-  面板里的**顶层** `Menu` 只能向下弹出，SwiftUI 没有改变弹出方向的 API。
-  想让它向右展开，就得给它套一个父级 Menu（多一层点击）。
-- **MenuBarExtra(.window) 里 Menu 的视觉差异**：`borderlessButton` 会改写
-  标签的**字型字重 + 垂直基线 + 右侧箭头方向**（箭头会按子菜单的弹出方向自动
-  旋转为 ▾），覆盖了 `.font(.body)` 也会发现字型/字重仍不同；其它图标对比
-  起来就是"水平不对齐"。要去掉这些自动改写 → **完全不用 borderlessButton**，
-  `Menu(configuration)` 后直接挂 padding/background/hover（见 `RowMenuStyle`）。
-  此模式 `>` 方向由你自己在 `SubmenuLabel` 画（chevron.right 不会被覆盖）。
-- **/Applications 原地 ad-hoc 签名会产坏 seal（macOS 26 实测）**：`codesign -s -` 对
-  /Applications 下的 bundle 签名后，`CodeResources` 的 files2 把主程序记成
-  `MacOS/BingWallpaper.cstemp`（签名临时文件名），`codesign -v` 报
-  `a sealed resource is missing or invalid`，删签名重签仍 100% 复现；
-  **同一 bundle 在项目目录签名一次通过**。build.sh 因此改为暂存构建+验证后 ditto 搬运。
-  排查时用 `plutil -p .../CodeResources | grep cstemp` 认症。
-- **macOS 26 的 NSTextField 窄边框会被裁一半**（2026-09-03 实测）：系统改走 layer 绘制，
-  legacy `isBordered`/bezel 在小尺寸控件上只画上半截+左侧。解法：关掉
-  `isBordered/isBezeled` + `focusRingType=.none`，用 `wantsLayer` + layer 的
-  `borderWidth/cornerRadius/borderColor` 自绘；聚焦变色走 `NSTextFieldDelegate`
-  的 `controlTextDidBegin/EndEditing`（见 `askCustomTime` / `TimeInputBridge`）。
-- **同样场景下文字不垂直居中**：单行 NSTextField **没有公开的垂直对齐属性**，
-  `usesSingleLineMode` 也兜不住。两层都要修：
-  ① 非编辑态（显示）用 `NSTextFieldCell` 子类重写 `drawingRect(forBounds:)` 把文字摆中间
-  （见 `CenteredTextFieldCell`）；
-  ② **编辑态**点进去打字后改由 field editor（`NSTextView`）接管绘制，`drawingRect`
-  不再生效、文字会偏上，须在 `NSTextField` 子类 `becomeFirstResponder()` 里拿
-  `currentEditor()` 设 `textContainerInset` 顶部偏移补偿（见 `CenteredTextField`）。
-  漏掉 ② 就是"能编辑但字偏上"。
-- **UI 改动别指望在 agent shell 里截图自证**：跑 `NSApp.runModal` 的 GUI 探针进程会被
-  环境 SIGTERM（exit 137）；即便截到图也要**先确认图里真有目标窗口**——曾把拍到 Figma
-  桌面的截图当成"弹窗验证通过"报错结论。模态弹窗样式一律交老大目验。
-- **menu bar App 自建 modal 窗口里的 NSTextField 无法编辑**（2026-09-04 实测修复）：
-  App 是 `LSUIElement`（activationPolicy=.accessory），其窗口在 App 非激活态无法成为
-  key window，而 NSTextField 必须在 key window 中才能进编辑模式；`runModal(for:)`
-  内部的 `makeKeyAndOrderFront` 因 app 非激活被系统忽略 → 表现为"按钮能点、输入框打不进字"。
-  解：弹窗前临时 `NSApp.setActivationPolicy(.regular)`（LSUIElement 保证 Dock 不露图标），
-  `runModal` 结束后还原 `.accessory`；并补 `makeKeyAndOrderFront` + `makeFirstResponder`，
-  input 也显式 `isEditable/isSelectable`（见 `askCustomTime`）。
-  ⚠️ GUI 文本可编辑性无法在 agent shell 验证（runModal 探针会被 SIGTERM），一律交老大目验。
+- **GUI / AppKit 通用坑（自建 modal 输入三连、菜单栏菜单样式、图标 sips、原地签名坏 seal）**
+  → 已迁 **`docs/appkit-pitfalls.md`**，动 GUI 前读它，本文档不重复展开
+- **菜单栏 App 的一次性内存 Timer 会被 App Nap 无限期拖住**（9-04/9-05/9-06 三天"定时没触发"
+  的共同病灶，2026-09-06 定性）：LSUIElement App 长期无窗口不活跃，系统对其 App Nap
+  ——进程暂停、runloop 停摆，`Timer.scheduledTimer` 到期也不触发，直到用户交互唤醒。
+  **现象最迷惑的一次**：App 活着、机器醒着（pmset 证实没睡）、网络通、有新图，09:30 却什么都没发生。
+  解：进程存活期间持有一个 activity token 防 nap——
+  `napActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep], reason: ...)`
+  （允许系统空闲睡眠，只防 App Nap，不破坏节能）。见 `WallpaperManager.napActivity`。
+  ⚠️ **但豁免并不够**（2026-09-08 实测：加了 beginActivity，09:30 仍漏更）。
+  **根本解法是别用一次性 Timer**：一次性 Timer 错过那个瞬间就永久错过，没有任何自愈机制。
+  已改为**每分钟轮询 + `lastDailyCheck` 日期标记**（`setupTimer` / `runDailyCheckIfNeeded`）：
+  只要进程活过任意一分钟就会补跑，天然自愈，且每天只跑一次。
+  **以后别再改回"一次性 Timer + 重排下一天"的写法。**
+- **腾讯柠檬清理会删 `~/Library/Application Support/BingWallpaper/`**（2026-09-05 20:36 实测，
+  目录被整个清掉）：App 不重启时内存清单仍在、表现正常；一旦重启，init 重建空目录 + 清单归零。
+  且 `saveManifest()` 原实现只 write 不 createDirectory → 目录被删后清单**再也写不回**（静默失败）。
+  已修：saveManifest 写前先 `createDirectory(withIntermediateDirectories:)`。
+  仍要提醒老大把该目录加进柠檬清理白名单，否则每次清理复发。
+  附带防线：`download()` 先查目标文件是否存在（存在即跳过+记清单），故清单归零重启也不会重下历史图。
 
 ## 未决（未排期）
 
 - 菜单栏图标是否换成 logo —— **老大 2026-09-04 决定：暂时保持现状**（继续用
   SF Symbol `photo`）。真要换，触发条件仍是提供纯黑单色剪影版素材
   （全彩 logo 缩到 18px 会糊；macOS 菜单栏图标惯例走单色模板模式）
+- **`dailyTime` 是否从 09:30 挪到下午**（2026-09-08 提出，未排期）：因 Bing 当天图晚发
+  （见"实测技术事实"），09:30 定点抓到的必然是前一天的图。备选：① 挪到 14:00（Bing 早发完）；
+  ② 保留 09:30，若当次没抓到当天图则下午再补一次。
+  **触发条件**：老大确认"慢一天"不可接受。在此之前保持现状。
+- **把 `~/Library/Application Support/BingWallpaper/` 加进腾讯柠檬清理白名单**（2026-09-06 提出，
+  **老大尚未确认已加**）：`LemonMonitor` 仍在运行，清单目录有被再次清掉的风险。
 - 壁纸填充第五种「拼贴」—— **未排期**。公开 API 不支持（见"已知的坑"），
   可行方案是预合成拼贴大图 + 充满屏幕应用，会破坏上一张/下一张导航。
   **实际意义也存疑**：我们的图本身就是 4K，4K 屏上拼贴 = 一张刚好铺满（≈ 居中），

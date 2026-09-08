@@ -79,6 +79,24 @@ env http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
 rm -f /tmp/gh_askpass.sh   # 用完即删
 ```
 
+### 每次提交前的令牌安检（2026-09-04 起执行）
+
+文档里出现过 `ghp_` 字样（`docs/git-and-remote.md` 的示例里就有），**提交前必须核实是真令牌还是占位符**：
+
+```bash
+git grep -n "ghp_"
+```
+
+2026-09-04 扫到 2 处，核实为占位示例（`ghp_你的令牌`）后放行。
+**真令牌一旦进 git 历史就永久留痕**（即便后续删除），所以这一步不能省。
+
+### 一个配置障碍：陈旧锁文件
+
+`git config --global` 报 `could not lock config file`，多是上次异常退出残留的 `~/.gitconfig.lock`
+（当时已无 git 进程在跑）。备份 `~/.gitconfig` 后删锁重试即可。
+
+---
+
 ### 怎么确认真的推上去了
 
 别只信 `Everything up-to-date` 这类提示，直接比对 SHA：

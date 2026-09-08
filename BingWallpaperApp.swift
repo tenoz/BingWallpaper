@@ -76,6 +76,9 @@ final class WallpaperManager: ObservableObject {
     }
     private var timer: Timer?
     private var wakeToken: NSObjectProtocol?
+    /// App Nap 豁免：菜单栏 App 长期不活跃会被系统 App Nap 暂停，一次性 Timer 可能被无限期拖住
+    ///（9-04/9-05/9-06 三天"定时没触发"的共同病灶）。beginActivity 防 nap 但不阻止系统睡眠。
+    private var napActivity: NSObjectProtocol?
 
     /// 下载目录：可手动指定，默认 DEFAULT_PICS_DIR，选择后持久化到 UserDefaults
     @Published var picsDir: URL {
@@ -107,45 +110,60 @@ final class WallpaperManager: ObservableObject {
         refreshCurrentName()
         setupTimer()
         registerWakeObserver()
+        // 阻止 App Nap：进程存活期间持续有效，保证每日定时 Timer 准时触发
+        napActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "每日定时换壁纸需准时触发"
+        )
         Task { @MainActor in await self.refresh() }
     }
 
-    /// 每天定时：一次性定时器到点触发，触发后重排下一天（避免累积漂移，天然跟随修改）
+    /// 每天定时：**每分钟轮询 + 日期标记**，不用一次性长定时器。
+    /// 一次性 Timer 一旦错过那个瞬间就永久错过（9-04/9-06/9-08 三天漏更的共同根因，
+    /// 且 App Nap 豁免也兜不住）；轮询只要进程活过任意一分钟就会补跑，天然自愈。
+    /// 每天只跑一次靠 lastDailyCheck 标记；修改 dailyTime 后下一分钟自动按新时刻判断。
     private func setupTimer() {
         timer?.invalidate()
-        timer = nil
-        let wait = max(nextDailyFire().timeIntervalSinceNow, 1)
-        timer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                await self?.refresh()
-                self?.setupTimer()
-            }
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.runDailyCheckIfNeeded() }
         }
     }
 
-    /// 下一个 dailyTime 时刻（今日已过则排明天）
-    private func nextDailyFire() -> Date {
+    /// 已过今天的设定时刻、且今天的定点检查还没跑过 → 跑一次
+    private func runDailyCheckIfNeeded() {
+        guard isPastDailyTime else { return }
+        if let d = lastDailyCheck, Calendar.current.isDate(d, inSameDayAs: Date()) { return }
+        lastDailyCheck = Date()
+        Task { @MainActor in await refresh() }
+    }
+
+    private var isPastDailyTime: Bool { todayFireDate() <= Date() }
+
+    /// 今天的 dailyTime 时刻
+    private func todayFireDate() -> Date {
         let p = dailyTime.split(separator: ":").compactMap { Int($0) }
         let h = p.count > 0 ? min(max(p[0], 0), 23) : 8
         let m = p.count > 1 ? min(max(p[1], 0), 59) : 0
         var c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
         c.hour = h
         c.minute = m
-        let t = Calendar.current.date(from: c) ?? Date().addingTimeInterval(86400)
-        return t > Date() ? t : t.addingTimeInterval(86400)
+        return Calendar.current.date(from: c) ?? Date()
     }
 
-    /// 电脑从睡眠唤醒时自动检查一次。菜单栏 App 长期不活跃，一次性定时器可能被 App Nap 推迟，
-    /// 唤醒后主动补一次最稳。refresh 按清单去重，重复唤醒不会重复下载；顺手重排每日定时器，
-    /// 避免长睡眠后错过当天的点。
+    /// 已完成「定点检查」的日期。冷启动 / 唤醒那两次**不写这里**，
+    /// 否则早上冷启动跑过一次就把当天的定点机会占掉了（定点可能才有新图）。
+    private var lastDailyCheck: Date? {
+        get { UserDefaults.standard.object(forKey: "lastDailyCheck") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "lastDailyCheck") }
+    }
+
+    /// 电脑从睡眠唤醒时自动检查一次：让"醒来立刻看到新图"，不必等下一分钟轮询。
+    /// refresh 按清单去重，重复唤醒不会重复下载；定时器已是每分钟轮询，无需在此重排。
     private func registerWakeObserver() {
         wakeToken = NotificationCenter.default.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                await self?.refresh()
-                self?.setupTimer()
-            }
+            Task { @MainActor in await self?.refresh() }
         }
     }
 
@@ -332,7 +350,9 @@ final class WallpaperManager: ObservableObject {
     private func candidates() async -> [BingImage] {
         var out: [BingImage] = []
         for idx in [0, 8] {
-            guard let u = URL(string: "https://www.bing.com/HPImageArchive.aspx?format=js&idx=\(idx)&n=8&mkt=zh-CN"),
+            // 主机走 cn.bing.com：国内直连 www.bing.com 会被断流（2026-09-05 实测），
+            // cn 与 www 的接口/图片数据一致，不会影响去重键
+            guard let u = URL(string: "https://cn.bing.com/HPImageArchive.aspx?format=js&idx=\(idx)&n=8&mkt=zh-CN"),
                   let (data, _) = try? await URLSession.shared.data(from: u),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let images = obj["images"] as? [[String: Any]] else { continue }
@@ -340,7 +360,7 @@ final class WallpaperManager: ObservableObject {
                 guard let sd  = im["startdate"] as? String,
                       let ub  = im["urlbase"] as? String,
                       let raw = ub.components(separatedBy: "id=").last,
-                      let url = URL(string: "https://www.bing.com/th?id=\(raw)_UHD.jpg") else { continue }
+                      let url = URL(string: "https://cn.bing.com/th?id=\(raw)_UHD.jpg") else { continue }
                 let name = stripMarket(raw)
                 out.append(BingImage(date: dashDate(sd), name: name, id: name.uppercased(), url: url))
             }
@@ -362,6 +382,8 @@ final class WallpaperManager: ObservableObject {
 
     private func saveManifest() {
         guard let d = try? JSONSerialization.data(withJSONObject: Array(manifest).sorted()) else { return }
+        // 目录可能被清理工具（如腾讯柠檬清理 2026-09-05 实测）删掉，先确保存在再写，否则静默失败
+        try? FileManager.default.createDirectory(at: SUPPORT_DIR, withIntermediateDirectories: true)
         try? d.write(to: manifestFile)
     }
 

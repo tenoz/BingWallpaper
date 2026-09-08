@@ -18,7 +18,11 @@ $PY backfill.py             # 真跑
 
 脚本解析 GitHub 仓库 `niumoo/bing-wallpaper` 的 `picture/YYYY-MM/README.md` 索引，
 拼裸 `_UHD.jpg` 直链下载（仓库 README 里的原链带 `&rf=…&w=&h=`，会被 CDN 重压，
-**不能用**——只取 `id=` 参数自行拼 `https://www.bing.com/th?id=<ID>_UHD.jpg`）。
+**不能用**——只取 `id=` 参数自行拼 `<主机>/th?id=<ID>_UHD.jpg`）。
+
+> ⚠️ **脚本当前仍写死 `www.bing.com`**（2026-09-08 核对 `backfill.py:108`），与根 `CLAUDE.md`
+> 「抓取主机一律用 `cn.bing.com`」的铁律不符——`www` 在国内会被断流（2026-09-05 实测）。
+> **要续传回填前建议先改成 `cn`**，否则会整轮失败。是否改动待老大确认，本次未动代码。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
