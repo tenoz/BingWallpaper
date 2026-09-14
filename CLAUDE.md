@@ -1,8 +1,8 @@
 ---
 title: 必应每日壁纸采集 · 项目规则
 created: 2026-09-01
-updated: 2026-09-08
-status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改动**尚未提交**（待老大确认）
+updated: 2026-09-14
+status: 任务A / 任务B 均已完成；2026-09-14 新增「切换模式 + 自动切换间隔 + 菜单分组」，已构建并实测验证，待老大确认后提交
 ---
 
 # 必应每日壁纸采集
@@ -18,7 +18,8 @@ status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改�
 | **产物 App** | `/Applications/BingWallpaper.app` | 编译后的菜单栏应用 |
 
 项目目录：`BingWallpaperApp.swift`（源码）、`backfill.py`（回填）、`build.sh` / `package.sh`、
-`logo2.jpeg` + `AppIcon.*`（图标产物，可由 build.sh 重建）、`docs/`、`README.md`、`CLAUDE.md`（本文档）。
+`verify-wallpaper.sh`（壁纸验证探针）、`logo2.jpeg` + `AppIcon.*`（图标产物，可由 build.sh 重建）、
+`docs/`、`README.md`、`CLAUDE.md`（本文档）。
 
 ### 深入文档（docs/ 指针表）
 
@@ -28,6 +29,7 @@ status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改�
 | `docs/appkit-pitfalls.md` | 要动 GUI 时（自建 modal 输入、菜单栏菜单、图标、签名） |
 | `docs/decisions-and-lessons.md` | 想知道「这条约定为什么这么定」时 |
 | `docs/git-and-remote.md` | 换机器 / 推送认证失败时 |
+| `docs/switch-mode-design.md` | 要改**切换模式 / 自动切换间隔**（`switchMode` / `switchInterval`）时 |
 
 > 受众区分：`README.md` 讲"怎么用、怎么排错"，本文档讲"改代码时必须遵守什么"。
 > 两者不互相抄全文。
@@ -47,7 +49,25 @@ status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改�
 `/Applications/BingWallpaper.app`，Swift 原生，功能：
 - 抓最新 Bing 4K 壁纸并下载
 - 按**自身清单**去重，不重复下载
-- **无自动模式**（2026-09-02 老大拍板去掉）：每次检查后固定应用最新一张；随机只保留手动「随机一张」
+- **切换模式**（2026-09-14 新增，存 `switchMode`，默认「最新」）：最新 / 循环 / 随机
+  - ⚠️ **本条推翻 2026-09-02「无自动模式」旧拍板**（老大 2026-09-14 重新提出）
+  - **最新**：取图库最新一张
+  - **循环**：**从旧到新**推进，到最新一张后**回卷**到最旧；与手动翻页按钮方向一致
+  - **随机**：排除「当前正显示的那张」——否则可能抽到同一张、视觉上像没换
+  - 手动的「设为最新」「随机一张」与自动模式共用同一套选图逻辑（`pickImage` / `randomImage`）
+- **自动切换间隔**（2026-09-14 新增，存 `switchInterval`，默认「手动」）：
+  手动 / 30 分钟 / 1 小时 / 4 小时 / 8 小时 / 12 小时 / 24 小时；**rawValue 直接是秒数**，
+  判定即 `now - lastSwitch >= rawValue` 一句话，加档位只改 enum
+  - ⚠️ 挂在**同一个 60 秒轮询**上（`runAutoSwitchIfNeeded`），**绝不另起 Timer**——理由同"每天定时"
+  - 计时基准 `lastSwitch` 持久化；手动切图 / 改模式改间隔 / 每次自动切换后刷新（`resetSwitchTimer`）
+  - **手动模式下不自动切换**，但每天定点检查后仍按模式应用一张（即升级前的旧行为，
+    故默认「手动 + 最新」时行为与旧版完全一致）
+  - 睡眠期间不切换，唤醒后若已超间隔**只补切一次**（比较的是时间差，天然如此）
+  - 「目标 == 当前壁纸」时跳过设置调用，但**计时照常推进**（否则会每分钟重复尝试无意义设置）
+  - 菜单显示「下次切换 HH:mm」倒计时（`nextSwitchAt`）。用**绝对时刻**、跨天带日期——
+    相对时间（「还有 N 分钟」）在菜单久开时会变成过期数据
+  - ⚠️ **「最新」+ 短间隔是矛盾的**：Bing 一天只出一张新图，故「30 分钟 + 最新」实际一天只变一次。
+    短间隔只有配**循环 / 随机**才有意义
 - **更新时间**（2026-09-03 老大拍板，已**移除**早期的「按间隔」二选一）：
   只有「每天定时」一种，存 `dailyTime`（默认 08:00）。「自定义时间…」弹窗输入时
   **自动补冒号**（输 `0830` 实时变 `08:30`，不必手输 `:`；只输 1-2 位数字按整点处理），
@@ -57,12 +77,18 @@ status: 任务A / 任务B 均已完成；2026-09-08 的「定时改轮询」改�
 - **检查触发点**：① 每天过 `dailyTime` 后的**定点检查**（轮询判断，当天只跑一次）；
   ② `App 冷启动`（`init` 里的 `refresh()`）；③ `电脑唤醒`（`didWakeNotification`）。
   ②③ 是兜底，**不写 `lastDailyCheck`**——否则早上冷启动跑过就占掉当天的定点机会。
-  按清单去重，重复触发不重复下载。主体仍是「每天定时查一次」，非新增自动模式
+  按清单去重，重复触发不重复下载。
+  **`refresh(apply:)` 参数**（2026-09-14）：以上三处 + 菜单「立即检查更新」都走同一入口，
+  但菜单那处传 `apply: false`——只拉新图入库，**不**顺手顶掉当前壁纸
 - 壁纸填充方式（存 `scalingMode`，默认充满屏幕）：充满屏幕 / 适合于屏幕 /
   拉伸以充满屏幕 / 居中，映射 `NSImageScaling`，选择后立即对当前壁纸重应用
-- 手动切换：菜单顶部预览图**两侧圆形按钮** = 上一张 / 下一张（从系统当前壁纸反查索引，无状态）
+  （重应用的是**同一张图**，故 `setWallpaper(resetTimer: false)`，不重置自动切换计时）
+- 手动切换：菜单顶部预览图**两侧圆形按钮** = 上一张 / 下一张（从系统当前壁纸反查索引，无状态）。
+  ⚠️ 手动翻页到边界**夹紧**（不回卷），自动循环才回卷——两者共用 `adjacent(_:wrap:)`，靠 `wrap` 开关区分
 - 菜单顶部显示当前桌面壁纸预览图（`.window` 样式 + ImageIO 缩略图，maxPixel 560）
-- **子菜单行（壁纸填充/更新时间）**：SwiftUI 外观 + `AnchorReader` 锚点定位 +
+- **菜单按功能分 4 组**（2026-09-14）：**切换壁纸** / **显示** / **下载与更新** / **通用**，
+  组间 `Divider()` + `SectionHeader` 小标题（11px 次级灰字，不可点）
+- **子菜单行（切换模式 / 自动切换 / 壁纸填充 / 更新时间）**：SwiftUI 外观 + `AnchorReader` 锚点定位 +
   `NSMenu.popUp` 手工在**整行右侧**弹出；嵌套子菜单经 `NSMenuItem.submenu` 右侧级联；
   整行可点。**勿改回 SwiftUI `Menu`（只能向下弹）或 NSButton（外观与 MenuRow 不一致）**
 - 【关于 Bing Wallpaper】面板：App 图标 + 版本（`0.9.0`，从 Info.plist 读）
@@ -158,7 +184,8 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 
 - **别信壁纸 `Index.plist` 的 `LastSet` 字段**：那是「系统设置」App 的记账字段，
   不走 NSWorkspace 更新。设完壁纸后它仍显示旧日期，极易误判为"没生效"。
-  验证壁纸请写 Swift 探针读 `NSWorkspace.shared.desktopImageURL(for:)`。
+  验证壁纸请写 Swift 探针读 `NSWorkspace.shared.desktopImageURL(for:)`
+  —— 已固化为 `./verify-wallpaper.sh`（2026-09-14），直接用，不必每次重写。
 - **shell 里别用 `/tmp` 做路径前缀判断**：macOS 会解析成 `/private/tmp`，断言会误判。
 - **`ls -t` 按修改时间排序不可靠**：批量下载时文件同秒，排序会乱。
   文件名以 `YYYY-MM-DD` 开头，用字典序（默认 `sort`）才是时间序。
@@ -184,6 +211,8 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
   已改为**每分钟轮询 + `lastDailyCheck` 日期标记**（`setupTimer` / `runDailyCheckIfNeeded`）：
   只要进程活过任意一分钟就会补跑，天然自愈，且每天只跑一次。
   **以后别再改回"一次性 Timer + 重排下一天"的写法。**
+  ⚠️ 2026-09-14 起**自动切换间隔**（`runAutoSwitchIfNeeded`）也挂在**同一个** 60 秒轮询上。
+  8/12/24 小时这类长间隔尤其不许另起 Timer——那等于把上面这个坑重挖一遍。
 - **腾讯柠檬清理会删 `~/Library/Application Support/BingWallpaper/`**（2026-09-05 20:36 实测，
   目录被整个清掉）：App 不重启时内存清单仍在、表现正常；一旦重启，init 重建空目录 + 清单归零。
   且 `saveManifest()` 原实现只 write 不 createDirectory → 目录被删后清单**再也写不回**（静默失败）。

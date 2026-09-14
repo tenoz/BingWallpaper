@@ -27,6 +27,37 @@ enum ScalingMode: String, CaseIterable {
     }
 }
 
+/// 切换模式：决定「该换哪一张」
+enum SwitchMode: String, CaseIterable {
+    case newest = "最新"
+    case cycle  = "循环"
+    case random = "随机"
+}
+
+/// 自动切换间隔。rawValue 直接是秒数，判定即 `now - lastSwitch >= rawValue`，
+/// 加档位只改这里。manual = 0 表示不自动切换（每天定点检查仍会换一张，即旧行为）。
+enum SwitchInterval: Int, CaseIterable {
+    case manual = 0
+    case min30  = 1800
+    case hour1  = 3600
+    case hour4  = 14400
+    case hour8  = 28800
+    case hour12 = 43200
+    case hour24 = 86400
+
+    var label: String {
+        switch self {
+        case .manual: return "手动"
+        case .min30:  return "30 分钟"
+        case .hour1:  return "1 小时"
+        case .hour4:  return "4 小时"
+        case .hour8:  return "8 小时"
+        case .hour12: return "12 小时"
+        case .hour24: return "24 小时"
+        }
+    }
+}
+
 struct BingImage {
     let date: String
     let name: String
@@ -74,6 +105,23 @@ final class WallpaperManager: ObservableObject {
     @Published var scalingMode: ScalingMode {
         didSet { UserDefaults.standard.set(scalingMode.rawValue, forKey: "scalingMode") }
     }
+    /// 切换模式（最新 / 循环 / 随机）；改动只重置计时基准，不立即切换
+    @Published var switchMode: SwitchMode {
+        didSet {
+            UserDefaults.standard.set(switchMode.rawValue, forKey: "switchMode")
+            resetSwitchTimer()
+        }
+    }
+    /// 自动切换间隔；改动只重置计时基准，不立即切换
+    @Published var switchInterval: SwitchInterval {
+        didSet {
+            UserDefaults.standard.set(switchInterval.rawValue, forKey: "switchInterval")
+            resetSwitchTimer()
+        }
+    }
+    /// 下次自动切换时刻，仅供菜单显示倒计时。由 lastSwitch + switchInterval 算出，不持久化。
+    /// 用绝对时刻而非「还有 N 分钟」：菜单久开时相对时间会变成过期数据。
+    @Published var nextSwitchAt: Date?
     private var timer: Timer?
     private var wakeToken: NSObjectProtocol?
     /// App Nap 豁免：菜单栏 App 长期不活跃会被系统 App Nap 暂停，一次性 Timer 可能被无限期拖住
@@ -101,6 +149,9 @@ final class WallpaperManager: ObservableObject {
         dailyTime     = UserDefaults.standard.string(forKey: "dailyTime") ?? "08:00"
         recentTimes   = UserDefaults.standard.stringArray(forKey: "recentTimes") ?? ["08:00"]
         scalingMode   = ScalingMode(rawValue: UserDefaults.standard.string(forKey: "scalingMode") ?? "") ?? .fill
+        switchMode    = SwitchMode(rawValue: UserDefaults.standard.string(forKey: "switchMode") ?? "") ?? .newest
+        // integer(forKey:) 对未存的键返回 0，正好等于 .manual，默认值天然正确
+        switchInterval = SwitchInterval(rawValue: UserDefaults.standard.integer(forKey: "switchInterval")) ?? .manual
         let savedDir = UserDefaults.standard.string(forKey: "picsDir") ?? ""
         picsDir = savedDir.isEmpty ? DEFAULT_PICS_DIR : URL(fileURLWithPath: savedDir, isDirectory: true)
         try? FileManager.default.createDirectory(at: picsDir,     withIntermediateDirectories: true)
@@ -110,11 +161,12 @@ final class WallpaperManager: ObservableObject {
         refreshCurrentName()
         setupTimer()
         registerWakeObserver()
-        // 阻止 App Nap：进程存活期间持续有效，保证每日定时 Timer 准时触发
+        // 阻止 App Nap：进程存活期间持续有效，保证每日定时与自动切换的轮询准时触发
         napActivity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
-            reason: "每日定时换壁纸需准时触发"
+            reason: "壁纸定时检查与自动切换需准时触发"
         )
+        updateNextSwitch()   // 重启后按持久化的 lastSwitch 复原倒计时
         Task { @MainActor in await self.refresh() }
     }
 
@@ -125,8 +177,49 @@ final class WallpaperManager: ObservableObject {
     private func setupTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runDailyCheckIfNeeded() }
+            Task { @MainActor in
+                self?.runDailyCheckIfNeeded()
+                self?.runAutoSwitchIfNeeded()
+            }
         }
+    }
+
+    /// 到点自动切换：**与「每天定点检查」共用同一个 60 秒轮询，不另起 Timer**。
+    /// 8/12/24 小时这类长间隔若用一次性 Timer，会重演 9-04~9-08 的漏更问题
+    /// （错过那个瞬间即永久错过，App Nap 豁免也兜不住）。
+    /// 睡眠期间不切换，唤醒后若已超间隔则补切一次——比较的是时间差，天然只补一次。
+    private func runAutoSwitchIfNeeded() {
+        guard switchInterval != .manual else { return }
+        let base = lastSwitch ?? Date()
+        guard Date().timeIntervalSince(base) >= Double(switchInterval.rawValue) else { return }
+        applyByMode()
+    }
+
+    /// 自动切换的计时基准：手动切图 / 改模式改间隔 / 每次自动切换后刷新。
+    /// 用 UserDefaults 持久化，App 重启后不丢进度。
+    private var lastSwitch: Date? {
+        get { UserDefaults.standard.object(forKey: "lastSwitch") as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: "lastSwitch") }
+    }
+
+    /// 把计时基准拨到现在并刷新倒计时；**不触发立即切换**（避免改设置时画面跳变）
+    private func resetSwitchTimer() {
+        lastSwitch = Date()
+        updateNextSwitch()
+    }
+
+    /// 由 lastSwitch + switchInterval 算出下次切换时刻（手动模式 → nil，菜单不显示倒计时）
+    private func updateNextSwitch() {
+        guard switchInterval != .manual, let base = lastSwitch else { nextSwitchAt = nil; return }
+        nextSwitchAt = base.addingTimeInterval(Double(switchInterval.rawValue))
+    }
+
+    /// 倒计时文案；跨天时带日期，避免「12:34」被误读成今天
+    var nextSwitchText: String? {
+        guard let d = nextSwitchAt else { return nil }
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDateInToday(d) ? "HH:mm" : "MM-dd HH:mm"
+        return "下次切换 " + f.string(from: d)
     }
 
     /// 已过今天的设定时刻、且今天的定点检查还没跑过 → 跑一次
@@ -387,8 +480,10 @@ final class WallpaperManager: ObservableObject {
         try? d.write(to: manifestFile)
     }
 
-    /// 抓取 + 按清单去重下载 + 按自动模式应用壁纸（手动触发下载走同一入口）
-    func refresh() async {
+    /// 抓取 + 按清单去重下载。
+    /// apply = 是否顺带按模式换壁纸：定点检查 / 冷启动 / 唤醒为 true（保持旧行为），
+    /// 菜单「立即检查更新」传 false——用户点它可能只想刷新列表，不该顺手顶掉当前壁纸。
+    func refresh(apply: Bool = true) async {
         status = "检查新壁纸…"
         let cands = await candidates()
         guard !cands.isEmpty else { status = "接口无返回"; return }
@@ -397,7 +492,9 @@ final class WallpaperManager: ObservableObject {
             if await download(c) { manifest.insert(c.id); added += 1 }
         }
         saveManifest()
-        applyAuto(note: added > 0 ? "（新增 \(added) 张）" : "（无新图）")
+        let note = added > 0 ? "（新增 \(added) 张）" : "（无新图）"
+        guard apply else { status = "已检查" + note; return }
+        applyByMode(note: note)
     }
 
     // MARK: 图片列表
@@ -408,17 +505,65 @@ final class WallpaperManager: ObservableObject {
                     .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
     func newestImage() -> URL? { listImages().last }
-    func randomImage() -> URL? { listImages().randomElement() }
+
+    /// 随机一张：排除「当前正显示的那张」，否则可能抽到同一张、视觉上像没换。
+    /// 手动的「随机一张」与自动的随机模式共用此入口。
+    func randomImage() -> URL? {
+        let imgs = listImages()
+        guard !imgs.isEmpty else { return nil }
+        guard imgs.count > 1 else { return imgs[0] }
+        let cur = currentWallpaperURL()
+        let pool = imgs.filter { $0.standardizedFileURL != cur?.standardizedFileURL }
+        return (pool.isEmpty ? imgs : pool).randomElement()
+    }
+
+    /// 相对当前壁纸偏移 delta 张。从系统当前壁纸**反查索引**，不存游标——
+    /// App 重启 / 用户在系统设置里换图 / 库目录增删文件都不会错乱。
+    /// wrap=false 到边界夹紧（手动翻页）；wrap=true 回卷（自动循环）。
+    private func adjacent(_ delta: Int, wrap: Bool) -> URL? {
+        let imgs = listImages()
+        guard !imgs.isEmpty else { return nil }
+        guard let cur = currentWallpaperURL(),
+              let i = imgs.firstIndex(where: { $0.standardizedFileURL == cur.standardizedFileURL })
+        else { return delta > 0 ? imgs[0] : imgs[imgs.count - 1] }   // 不在库内 → 从头 / 从尾开始
+        if wrap { return imgs[(i + delta + imgs.count) % imgs.count] }
+        return imgs[min(max(i + delta, 0), imgs.count - 1)]
+    }
+
+    /// 循环下一张：从旧到新推进，到最新一张后回卷到最旧
+    private func cycleNext() -> URL? { adjacent(1, wrap: true) }
+
+    /// 系统当前桌面壁纸（主屏）
+    private func currentWallpaperURL() -> URL? {
+        guard let s = NSScreen.main ?? NSScreen.screens.first else { return nil }
+        return NSWorkspace.shared.desktopImageURL(for: s)
+    }
 
     // MARK: 应用壁纸
 
-    /// 检查后自动应用最新一张
-    func applyAuto(note: String = "") {
-        guard let t = newestImage() else { status = "库内无图片" + note; return }
-        setWallpaper(t, note: note)
+    /// 按当前模式取一张应用。每天定点检查后与自动切换到点共用此入口。
+    func applyByMode(note: String = "") {
+        guard let u = pickImage() else { status = "库内无图片" + note; return }
+        // 目标与当前相同（如「最新」模式下库内没有新图）→ 跳过设置调用，但计时照常推进，
+        // 否则每隔一分钟都会重复尝试同一个无意义的设置
+        if let cur = currentWallpaperURL(), cur.standardizedFileURL == u.standardizedFileURL {
+            resetSwitchTimer()
+            status = "已是\(switchMode.rawValue)壁纸" + note
+            return
+        }
+        setWallpaper(u, note: note)
     }
 
-    func setWallpaper(_ url: URL, note: String = "") {
+    private func pickImage() -> URL? {
+        switch switchMode {
+        case .newest: return newestImage()
+        case .cycle:  return cycleNext()
+        case .random: return randomImage()
+        }
+    }
+
+    /// resetTimer = false 用于「填充方式变更后重应用当前图」——图没变，不该重置自动切换计时
+    func setWallpaper(_ url: URL, note: String = "", resetTimer: Bool = true) {
         let ws = NSWorkspace.shared
         var screens = NSScreen.screens
         var tries = 0
@@ -438,24 +583,17 @@ final class WallpaperManager: ObservableObject {
         current    = url.lastPathComponent
         currentURL = url
         status  = "已设为 " + url.lastPathComponent + note
+        if resetTimer { resetSwitchTimer() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             let ok = NSScreen.screens.allSatisfy { ws.desktopImageURL(for: $0) == url }
             if !ok { self.status = "设置可能未生效：" + url.lastPathComponent }
         }
     }
 
-    /// 上一张 / 下一张：从系统当前壁纸反查索引，无状态、自愈
+    /// 上一张 / 下一张：手动翻页，到边界**夹紧**（不回卷，与自动循环的回卷语义区分开）
     func step(_ delta: Int) {
-        let imgs = listImages()
-        guard !imgs.isEmpty else { status = "库内无图片"; return }
-        guard let screen = NSScreen.main ?? NSScreen.screens.first,
-              let cur = NSWorkspace.shared.desktopImageURL(for: screen),
-              let i = imgs.firstIndex(where: { $0.standardizedFileURL == cur.standardizedFileURL })
-        else {
-            setWallpaper(delta > 0 ? imgs[0] : imgs[imgs.count - 1])
-            return
-        }
-        setWallpaper(imgs[min(max(i + delta, 0), imgs.count - 1)])
+        guard let u = adjacent(delta, wrap: false) else { status = "库内无图片"; return }
+        setWallpaper(u)
     }
 
     func openFolder() { NSWorkspace.shared.open(picsDir) }
@@ -640,6 +778,23 @@ func makeThumbnail(_ url: URL, maxPixel: CGFloat) -> NSImage? {
     return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
 }
 
+/// 菜单分组小标题：不可点，仅作视觉分类
+struct SectionHeader: View {
+    let title: String
+
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.top, 7)
+            .padding(.bottom, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// 菜单行：整行可点、悬停高亮，模拟原生菜单观感
 struct MenuRow: View {
     let title: String
@@ -821,6 +976,26 @@ struct MenuContent: View {
         return out
     }
 
+    /// 「切换模式」子菜单：最新 / 循环 / 随机
+    private var modeItems: [ContextItem] {
+        SwitchMode.allCases.map { m in
+            ContextItem(m.rawValue, checked: mgr.switchMode == m) {
+                guard mgr.switchMode != m else { return }
+                mgr.switchMode = m
+            }
+        }
+    }
+
+    /// 「自动切换」子菜单：手动 / 30 分钟 … 24 小时
+    private var intervalItems: [ContextItem] {
+        SwitchInterval.allCases.map { i in
+            ContextItem(i.label, checked: mgr.switchInterval == i) {
+                guard mgr.switchInterval != i else { return }
+                mgr.switchInterval = i
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 顶部：当前桌面壁纸预览，两侧叠上一张/下一张
@@ -856,10 +1031,36 @@ struct MenuContent: View {
 
             Divider()
 
+            // ── 切换壁纸：选哪张、多久换一次、手动换 ──
+            SectionHeader("切换壁纸")
+
+            SubmenuRow(icon: "arrow.triangle.2.circlepath",
+                       title: "切换模式：\(mgr.switchMode.rawValue)",
+                       items: modeItems)
+                .frame(width: 280, height: 26)
+
+            SubmenuRow(icon: "timer",
+                       title: "自动切换：\(mgr.switchInterval.label)",
+                       items: intervalItems)
+                .frame(width: 280, height: 26)
+
+            // 倒计时：仅自动模式显示（手动模式 nextSwitchText 为 nil）
+            if let t = mgr.nextSwitchText {
+                Text(t)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             MenuRow("设为最新", icon: "sparkles") { if let u = mgr.newestImage() { mgr.setWallpaper(u) } }
             MenuRow("随机一张", icon: "shuffle")  { if let u = mgr.randomImage() { mgr.setWallpaper(u) } }
 
             Divider()
+
+            // ── 显示：填充方式 ──
+            SectionHeader("显示")
 
             SubmenuRow(icon: "aspectratio",
                        title: "壁纸填充：\(mgr.scalingMode.rawValue)",
@@ -867,26 +1068,34 @@ struct MenuContent: View {
                 ContextItem(m.rawValue, checked: mgr.scalingMode == m) {
                     guard mgr.scalingMode != m else { return }
                     mgr.scalingMode = m
-                    if let u = mgr.currentURL { mgr.setWallpaper(u) }
+                    // 重应用的是当前这张图，图没变 → 不重置自动切换计时
+                    if let u = mgr.currentURL { mgr.setWallpaper(u, resetTimer: false) }
                 }
             })
             .frame(width: 280, height: 26)
 
-            // 更新时间：近期使用 / 自定义时间…（子菜单也在右侧级联）
+            Divider()
+
+            // ── 下载与更新：抓新图、存哪儿 ──
+            SectionHeader("下载与更新")
+
+            // 更新时间：近期使用 / 自定义时间…（子菜单在右侧级联）
             SubmenuRow(icon: "clock", title: updateText, items: updateItems)
                 .frame(width: 280, height: 26)
 
-            MenuRow("立即检查更新", icon: "arrow.clockwise") { Task { await mgr.refresh() } }
+            // apply: false —— 只拉新图入库，不顺手顶掉当前壁纸
+            MenuRow("立即检查更新", icon: "arrow.clockwise") { Task { await mgr.refresh(apply: false) } }
             MenuRow("打开壁纸文件夹", icon: "folder")        { mgr.openFolder() }
             MenuRow("选择下载目录…",  icon: "externaldrive") { mgr.chooseFolder() }
 
             Divider()
 
+            // ── 通用 ──
+            SectionHeader("通用")
+
             Toggle("开机启动", isOn: $mgr.autostart)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-
-            Divider()
+                .padding(.vertical, 4)
 
             MenuRow("关于 Bing Wallpaper", icon: "info.circle") { mgr.showAbout() }
 
