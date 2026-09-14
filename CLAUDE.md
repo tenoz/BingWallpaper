@@ -112,10 +112,12 @@ git 仓库（main 分支），`.gitignore` 排除：`.DS_Store`、`.workbuddy/`�
 **提交前必须先问老大（2026-09-03 定）**
 
 - **远端（2026-09-03 建并首推）**：`https://github.com/tenoz/BingWallpaper.git`，私有仓库
-- **推送两个坑（换机器/新环境必踩）**：① git 通道**只认 Basic**（`x-access-token` + PAT），
-  用 Bearer 头报 `invalid credentials`；② **必须绕过本机代理**
-  （`http_proxy` 指向 `127.0.0.1:59218`，走它报 `CONNECT tunnel failed, 502`）。
-  本机 2026-09-04 已配好钥匙串凭据 + github 代理例外，**日常直接 `git push` 即可**；
+- **推送的坑（2026-09-14 更新，方向反转过了）**：
+  ① git 通道**只认 Basic**（`x-access-token` + PAT），用 Bearer 头报 `invalid credentials`；
+  ② **代理方向会反转，必须现判**——09-04 是「必须绕过代理」，09-14 实测**直连被拦、必须走代理**，
+  且代理端口每次会话都可能变（09-04 见 59218，09-14 见 56231）。**别照抄旧结论、别写死端口**。
+  裸 `git push` 已不可用，改用 `docs/git-and-remote.md` 里的自适应覆盖命令
+  （从 `env` 现取代理端口 + `git -c ...push`）。代理会间歇 502，重试一两次即可。
   重建步骤与备用方案 → **`docs/git-and-remote.md`**
 
 ## 铁律与约定

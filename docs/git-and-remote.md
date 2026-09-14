@@ -27,13 +27,23 @@ printf '%s' 'ghp_你的令牌' > ~/.github_bw_pat && chmod 600 ~/.github_bw_pat
 
 ### 怎么推
 
-**已经配置好了，日常直接 `git push` 即可**，不用任何临时脚本。
+⚠️ **裸 `git push` 在当前（2026-09-14）实测环境里会失败**——直连 github 被拦。
+用这条**自适应命令**：读取当前会话的代理端口并临时覆盖，**不改任何配置文件**：
+
+```bash
+cd /Users/pxdog/Project/BingWallpaper
+PROXY="$(env | awk -F= '/^https_proxy=/{print $2}')"
+git -c "http.https://github.com/.proxy=$PROXY" push origin main
+```
+
+**代理端口每次会话可能不同**（09-04 见过 59218，09-14 见过 56231），
+所以**绝不把端口写死**，一律按上面从环境里现取。判断方向的方法见下方「坑二」。
 
 #### 已做的两处全局配置（2026-09-04）
 
 ```bash
 git config --global credential.helper osxkeychain   # 凭据存进 macOS 钥匙串
-git config --global http.https://github.com/.proxy ""  # github.com 不走代理
+git config --global http.https://github.com/.proxy ""  # github.com 不走代理 ← ⚠️ 见坑二，2026-09-14 起已不适用
 ```
 
 再把令牌一次性存进钥匙串（用户名必须是 `x-access-token`）：
@@ -53,10 +63,29 @@ printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n'
 用 `Authorization: Bearer` 会报 `invalid credentials`。必须走 Basic：
 用户名填 `x-access-token`，密码填令牌。
 
-**坑二：必须绕过本机代理。**
-开发机环境里 `http_proxy` / `https_proxy` 指向 `127.0.0.1:59218`，
-git 走它会报 `CONNECT tunnel failed, response 502`（而且时好时坏，
-同一时刻 curl 直连是通的，容易误判成网络问题）。
+**坑二：代理方向会反转——必须按当前环境现判，别照抄旧结论。**
+
+- **2026-09-04**：环境代理（当时 `127.0.0.1:59218`）连 github 报 `CONNECT tunnel failed, 502`，
+  而**直连是通的** → 当时结论是「**必须绕过代理**」，并配了
+  `git config --global http.https://github.com/.proxy ""`。
+- **2026-09-14**：环境变了（代理端口成了 `56231`，由沙箱进程 `sandbox-c` 监听）。
+  实测 **直连 `github.com:443` 超时**（`Failed to connect ... after 75023 ms`），
+  而**走代理 `HTTP 200`** → 结论**反转**为「必须走代理」。
+  旧的「绕过代理」全局配置此时反而**有害**，它让 git 去直连一个本来就不通的地址。
+
+**判断顺序（照做即可）**：
+
+```bash
+env | grep -i proxy                                    # 1. 拿当前代理地址
+curl -sS -o /dev/null -w '%{http_code}\n' --max-time 15 --noproxy '*' https://github.com   # 2. 测直连
+curl -sS -o /dev/null -w '%{http_code}\n' --max-time 15 -x "$https_proxy" https://github.com  # 3. 测代理
+```
+
+哪个返回 200 就用哪个：**走代理**用上面「怎么推」里的 `-c` 覆盖命令；**直连通**才用裸 `git push`。
+
+⚠️ **502 会间歇出现**：同一端口，curl 可能这次 502、下次 200（文档早先记的"时好时坏"是真的）。
+push 报 502 或超时时，**先原样重试一到两次**，往往就过了
+（2026-09-14 实测：override 后第一次 502，紧接着重试即成功）。
 
 #### 换机器或配置丢失时（备用方案）
 
